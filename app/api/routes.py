@@ -1,4 +1,5 @@
 """HTTP endpoints."""
+import asyncio
 import json
 import time
 import uuid
@@ -7,21 +8,31 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.backends.base import GenerationParams, Usage
+from app.core.concurrency import QueueFullError, with_deadline
+from app.core.metrics import STATS, RequestTimer
 from app.schemas import ChatRequest, GenerateRequest
 
 router = APIRouter()
 
 
-def error(status: int, kind: str, message: str, headers: dict | None = None) -> JSONResponse:
+def error(status: int, kind: str, message: str) -> JSONResponse:
+    headers = {"Retry-After": "1"} if status == 429 else None
     return JSONResponse({"error": {"type": kind, "message": message}}, status_code=status, headers=headers)
 
 
 @router.get("/health")
 async def health(request: Request):
-    backend = request.app.state.backend
+    backend, limiter = request.app.state.backend, request.app.state.limiter
     ok = await backend.health()
-    body = {"status": "ok" if ok else "unavailable", "backend": backend.name, "model": backend.model_id}
+    body = {"status": "ok" if ok else "unavailable", "backend": backend.name, "model": backend.model_id,
+            "in_flight": limiter.in_flight, "waiting": limiter.waiting,
+            "capacity": limiter.capacity, "queue_size": limiter.queue_size}
     return JSONResponse(body, status_code=200 if ok else 503)
+
+
+@router.get("/metrics")
+async def metrics():
+    return STATS.summary()
 
 
 @router.get("/models")
@@ -33,16 +44,34 @@ async def models(request: Request):
 
 @router.post("/v1/chat/completions")
 async def chat(req: ChatRequest, request: Request):
-    backend = request.app.state.backend
-    settings = request.app.state.settings
+    state = request.app.state
+    backend, limiter, settings = state.backend, state.limiter, state.settings
     params = GenerationParams(min(req.max_tokens, settings.max_tokens_limit), req.temperature, req.top_p)
     messages = [m.model_dump() for m in req.messages]
 
+    if limiter.is_full():  # quick "server busy" before doing any work
+        return error(429, "overloaded", "Server is busy, please retry shortly.")
+
     if req.stream:
-        return StreamingResponse(stream_chat(backend, messages, params), media_type="text/event-stream",
+        return StreamingResponse(stream_chat(backend, limiter, settings, messages, params),
+                                 media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    result = await backend.generate(messages, params)
+    timer = RequestTimer()
+    try:
+        async with limiter.slot():
+            async with asyncio.timeout(settings.request_timeout):
+                result = await backend.generate(messages, params)
+    except QueueFullError:
+        timer.finish(0, "rejected")
+        return error(429, "overloaded", "Server is busy, please retry shortly.")
+    except TimeoutError:
+        timer.finish(0, "timeout")
+        return error(504, "timeout", "Generation took too long.")
+    except Exception as e:  # e.g. Ollama not running
+        timer.finish(0, "error")
+        return error(503, "backend_unavailable", str(e) or type(e).__name__)
+    timer.first_token()  # non-streaming: the first token arrives together with the rest
     u = result.usage
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -53,6 +82,7 @@ async def chat(req: ChatRequest, request: Request):
                      "finish_reason": result.finish_reason}],
         "usage": {"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens,
                   "total_tokens": u.prompt_tokens + u.completion_tokens},
+        "metrics": timer.finish(u.completion_tokens),
     }
 
 
@@ -61,20 +91,43 @@ def sse(data) -> str:
     return f"data: {data if isinstance(data, str) else json.dumps(data)}\n\n"
 
 
-async def stream_chat(backend, messages: list[dict], params: GenerationParams):
-    """Yield the answer as OpenAI-style `chat.completion.chunk` events, then `[DONE]`."""
+async def stream_chat(backend, limiter, settings, messages: list[dict], params: GenerationParams):
+    """Yield the answer as OpenAI-style `chat.completion.chunk` events, then `[DONE]`.
+
+    The concurrency slot is held for the WHOLE stream. If the client disconnects, this generator
+    is cancelled and the `finally` blocks free the slot and stop the model.
+    """
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
-    def chunk(delta: dict, finish: str | None = None) -> dict:
+    def chunk(delta: dict, finish: str | None = None, **extra) -> dict:
         return {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                 "model": backend.model_id,
-                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}], **extra}
 
-    usage = Usage()
-    yield sse(chunk({"role": "assistant"}))
-    async for text in backend.stream(messages, params, usage):
-        yield sse(chunk({"content": text}))
-    yield sse(chunk({}, finish="stop"))
+    timer, usage, n_chunks, status = RequestTimer(), Usage(), 0, "ok"
+    try:
+        async with limiter.slot():
+            yield sse(chunk({"role": "assistant"}))
+            async for text in with_deadline(backend.stream(messages, params, usage), settings.request_timeout):
+                timer.first_token()
+                n_chunks += 1
+                yield sse(chunk({"content": text}))
+            m = timer.finish(usage.completion_tokens or n_chunks)
+            status = "done"
+            # `metrics` is an extra field; OpenAI clients simply ignore it, our demo page shows it.
+            yield sse(chunk({}, finish="stop", metrics=m))
+    except QueueFullError:
+        status = "rejected"
+        yield sse({"error": {"type": "overloaded", "message": "Server is busy, please retry shortly."}})
+    except TimeoutError:
+        status = "timeout"
+        yield sse({"error": {"type": "timeout", "message": "Generation took too long."}})
+    except Exception as e:
+        status = "error"
+        yield sse({"error": {"type": "backend_unavailable", "message": str(e) or type(e).__name__}})
+    finally:
+        if status not in ("done",):
+            timer.finish(usage.completion_tokens or n_chunks, "cancelled" if status == "ok" else status)
     yield sse("[DONE]")
 
 
