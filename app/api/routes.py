@@ -3,11 +3,12 @@ import asyncio
 import json
 import time
 import uuid
+from collections.abc import Callable
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.backends.base import GenerationParams, Usage
+from app.backends.base import GenerationParams, GenerationResult, Usage
 from app.core.concurrency import QueueFullError, with_deadline
 from app.core.metrics import STATS, RequestTimer
 from app.schemas import ChatRequest, GenerateRequest
@@ -31,8 +32,8 @@ async def health(request: Request):
 
 
 @router.get("/metrics")
-async def metrics():
-    return STATS.summary()
+async def metrics(request: Request):
+    return {**STATS.summary(), "cache": request.app.state.cache.stats()}
 
 
 @router.get("/models")
@@ -45,7 +46,7 @@ async def models(request: Request):
 @router.post("/v1/chat/completions")
 async def chat(req: ChatRequest, request: Request):
     state = request.app.state
-    backend, limiter, settings = state.backend, state.limiter, state.settings
+    backend, limiter, settings, cache = state.backend, state.limiter, state.settings, state.cache
     if req.model and req.model not in settings.models:
         return error(400, "invalid_request", f"Unknown model '{req.model}'. Available: {settings.models}")
     json_format = req.response_format.to_backend_format() if req.response_format else None
@@ -54,13 +55,17 @@ async def chat(req: ChatRequest, request: Request):
                               model=req.model or settings.model_id, format=json_format)
     messages = [m.model_dump() for m in req.messages]
 
+    # Cache: only for repeatable (temperature 0) requests. A hit skips the queue and the model.
+    cache_key = cache.key(messages, params) if req.cache and req.temperature == 0 else None
+    if cache_key and (hit := cache.get(cache_key)):
+        return cached_response(hit, params, req.stream)
+
     if limiter.is_full():  # quick "server busy" before doing any work
         return error(429, "overloaded", "Server is busy, please retry shortly.")
 
     if req.stream:
-        return StreamingResponse(stream_chat(backend, limiter, settings, messages, params),
-                                 media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        save = (lambda text, usage: cache.put(cache_key, GenerationResult(text, usage))) if cache_key else None
+        return sse_response(stream_chat(backend, limiter, settings, messages, params, on_complete=save))
 
     timer = RequestTimer()
     try:
@@ -76,21 +81,47 @@ async def chat(req: ChatRequest, request: Request):
     except Exception as e:  # e.g. Ollama not running
         timer.finish(0, "error")
         return error(503, "backend_unavailable", str(e) or type(e).__name__)
-    u = result.usage
-    metrics = timer.finish(u.completion_tokens)
+    if cache_key:
+        cache.put(cache_key, result)
+    metrics = timer.finish(result.usage.completion_tokens)
     if json_format:
         metrics["valid_json"] = is_json(result.text)
+    return completion_body(result, params.model, metrics)
+
+
+def completion_body(result: GenerationResult, model: str, metrics: dict) -> dict:
+    """A full (non-streaming) OpenAI-style chat completion."""
+    u = result.usage
     return {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "id": new_id(),
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": params.model,
+        "model": model,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": result.text},
                      "finish_reason": result.finish_reason}],
         "usage": {"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens,
                   "total_tokens": u.prompt_tokens + u.completion_tokens},
         "metrics": metrics,
     }
+
+
+def cached_response(hit: GenerationResult, params: GenerationParams, stream: bool):
+    metrics = {**RequestTimer().finish(hit.usage.completion_tokens, "cached"), "cached": True}
+    if not stream:
+        return completion_body(hit, params.model, metrics)
+
+    async def replay():
+        cid = new_id()
+        yield sse(chunk(cid, params.model, {"role": "assistant"}))
+        yield sse(chunk(cid, params.model, {"content": hit.text}))
+        yield sse(chunk(cid, params.model, {}, finish="stop", metrics=metrics))
+        yield sse("[DONE]")
+
+    return sse_response(replay())
+
+
+def new_id() -> str:
+    return f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
 
 def is_json(text: str) -> bool:
@@ -106,31 +137,40 @@ def sse(data) -> str:
     return f"data: {data if isinstance(data, str) else json.dumps(data)}\n\n"
 
 
-async def stream_chat(backend, limiter, settings, messages: list[dict], params: GenerationParams):
+def sse_response(events) -> StreamingResponse:
+    return StreamingResponse(events, media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def chunk(cid: str, model: str, delta: dict, finish: str | None = None, **extra) -> dict:
+    """One OpenAI-style `chat.completion.chunk` event."""
+    return {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()), "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}], **extra}
+
+
+async def stream_chat(backend, limiter, settings, messages: list[dict], params: GenerationParams,
+                      on_complete: Callable[[str, Usage], None] | None = None):
     """Yield the answer as OpenAI-style `chat.completion.chunk` events, then `[DONE]`.
 
     The concurrency slot is held for the WHOLE stream. If the client disconnects, this generator
     is cancelled and the `finally` blocks free the slot and stop the model.
+    `on_complete(text, usage)` is called only when the answer finished normally.
     """
-    cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-
-    def chunk(delta: dict, finish: str | None = None, **extra) -> dict:
-        return {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
-                "model": params.model,
-                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}], **extra}
-
-    timer, usage, n_chunks, status = RequestTimer(), Usage(), 0, "ok"
+    cid = new_id()
+    timer, usage, pieces, status = RequestTimer(), Usage(), [], "ok"
     try:
         async with limiter.slot():
-            yield sse(chunk({"role": "assistant"}))
+            yield sse(chunk(cid, params.model, {"role": "assistant"}))
             async for text in with_deadline(backend.stream(messages, params, usage), settings.request_timeout):
                 timer.first_token()
-                n_chunks += 1
-                yield sse(chunk({"content": text}))
-            m = timer.finish(usage.completion_tokens or n_chunks)
+                pieces.append(text)
+                yield sse(chunk(cid, params.model, {"content": text}))
+            m = timer.finish(usage.completion_tokens or len(pieces))
             status = "done"
+            if on_complete:
+                on_complete("".join(pieces), usage)
             # `metrics` is an extra field; OpenAI clients simply ignore it, our demo page shows it.
-            yield sse(chunk({}, finish="stop", metrics=m))
+            yield sse(chunk(cid, params.model, {}, finish="stop", metrics=m))
     except QueueFullError:
         status = "rejected"
         yield sse({"error": {"type": "overloaded", "message": "Server is busy, please retry shortly."}})
@@ -141,8 +181,8 @@ async def stream_chat(backend, limiter, settings, messages: list[dict], params: 
         status = "error"
         yield sse({"error": {"type": "backend_unavailable", "message": str(e) or type(e).__name__}})
     finally:
-        if status not in ("done",):
-            timer.finish(usage.completion_tokens or n_chunks, "cancelled" if status == "ok" else status)
+        if status != "done":
+            timer.finish(usage.completion_tokens or len(pieces), "cancelled" if status == "ok" else status)
     yield sse("[DONE]")
 
 

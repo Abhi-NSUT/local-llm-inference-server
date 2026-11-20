@@ -99,6 +99,8 @@
       <label class="toggle" for="modelSelect">Model:</label>
       <select id="modelSelect"></select>
       <button class="btn secondary" type="button" id="jsonBtn">Try JSON mode</button>
+      <label class="toggle" title="Temperature 0: the same question always gets the same answer, so repeats come from the cache">
+        <input type="checkbox" id="repeatToggle"> repeatable answers (cache)</label>
     </div>
   </section>
 
@@ -163,11 +165,11 @@ setInterval(refreshStatus, 2000);
 // ---------- Talking to the API ----------
 // Streams an answer. Calls onToken(text) for each piece and returns the final metrics.
 // EventSource only supports GET, so we read the POST response body as a stream instead.
-async function streamChat(messages, onToken, { maxTokens = 256, signal, model } = {}) {
+async function streamChat(messages, onToken, { maxTokens = 256, signal, model, temperature } = {}) {
   const res = await fetch("/v1/chat/completions", {
     method: "POST", signal,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, stream: true, max_tokens: maxTokens, model }),
+    body: JSON.stringify({ messages, stream: true, max_tokens: maxTokens, model, temperature }),
   });
   if (res.status === 429) throw new Error("busy");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -194,11 +196,12 @@ async function streamChat(messages, onToken, { maxTokens = 256, signal, model } 
 }
 
 // Whole answer at once (streaming off).
-async function askOnce(messages, { maxTokens = 256, signal, model, responseFormat } = {}) {
+async function askOnce(messages, { maxTokens = 256, signal, model, responseFormat, temperature } = {}) {
   const res = await fetch("/v1/chat/completions", {
     method: "POST", signal,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, stream: false, max_tokens: maxTokens, model, response_format: responseFormat }),
+    body: JSON.stringify({ messages, stream: false, max_tokens: maxTokens, model, temperature,
+                           response_format: responseFormat }),
   });
   const body = await res.json();
   if (res.status === 429) throw new Error("busy");
@@ -208,6 +211,7 @@ async function askOnce(messages, { maxTokens = 256, signal, model, responseForma
 
 function describe(m, ttftOverride) {
   if (!m) return "";
+  if (m.cached) return `⚡ from cache in ${Math.round(ttftOverride ?? m.latency_ms)} ms (model skipped)`;
   const first = ttftOverride ?? m.ttft_ms;
   return `⏱ first word after ${Math.round(first)} ms · ${m.tokens_per_sec} tokens/sec · ${m.completion_tokens} tokens`;
 }
@@ -257,11 +261,12 @@ document.getElementById("chatForm").addEventListener("submit", async e => {
         answer += piece;
         textNode.textContent = answer;
         log.scrollTop = log.scrollHeight;
-      }, { signal: controller.signal, model: modelSelect.value });
+      }, { signal: controller.signal, model: modelSelect.value, temperature: chosenTemperature() });
       stats.textContent = describe(m, firstWordMs);
     } else {
       stats.textContent = "waiting for the full answer…";
-      const r = await askOnce(history, { signal: controller.signal, model: modelSelect.value });
+      const r = await askOnce(history, { signal: controller.signal, model: modelSelect.value,
+                                         temperature: chosenTemperature() });
       answer = r.text;
       textNode.textContent = answer;
       const waited = performance.now() - started;   // with streaming off, the first word arrives with the last
@@ -285,6 +290,9 @@ document.getElementById("chatForm").addEventListener("submit", async e => {
   }
 });
 stopBtn.addEventListener("click", () => controller?.abort());   // closing the stream frees the server slot
+
+// undefined = server default (0.7, varied answers); 0 = repeatable answers, which can be cached
+const chosenTemperature = () => document.getElementById("repeatToggle").checked ? 0 : undefined;
 
 // ---------- Model picker ----------
 const modelSelect = document.getElementById("modelSelect");

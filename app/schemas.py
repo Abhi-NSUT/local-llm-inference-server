@@ -34,6 +34,7 @@ class ChatRequest(BaseModel):
     top_p: float = Field(0.9, gt=0, le=1)
     stream: bool = False
     response_format: ResponseFormat | None = None
+    cache: bool = True  # set false to always run the model (cache only applies at temperature 0)
 
 
 class GenerateRequest(BaseModel):
