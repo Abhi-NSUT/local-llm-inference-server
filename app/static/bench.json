@@ -1,0 +1,160 @@
+{
+ "machine": {
+  "chip": "Apple M1",
+  "ram_gb": 8,
+  "os": "macOS-27.2.1-arm64-arm-64bit",
+  "ollama": "0.40.16"
+ },
+ "models": [
+  {
+   "model": "qwen2.5:1.5b-instruct-fp16",
+   "label": "1.5B FP16",
+   "memory_gb": 3.41,
+   "load_s": 8.0,
+   "decode_tok_s": 16.6,
+   "prefill_tok_s": 432,
+   "ttft_long_s": 2.3,
+   "gsm8k": 0.78,
+   "mmlu": 0.5
+  },
+  {
+   "model": "qwen2.5:1.5b-instruct-q8_0",
+   "label": "1.5B Q8",
+   "memory_gb": 2.04,
+   "load_s": 4.3,
+   "decode_tok_s": 24.7,
+   "prefill_tok_s": 342,
+   "ttft_long_s": 2.9,
+   "gsm8k": 0.75,
+   "mmlu": 0.52
+  },
+  {
+   "model": "qwen2.5:1.5b",
+   "label": "1.5B Q4",
+   "memory_gb": 1.3,
+   "load_s": 3.0,
+   "decode_tok_s": 30.7,
+   "prefill_tok_s": 301,
+   "ttft_long_s": 3.3,
+   "gsm8k": 0.7,
+   "mmlu": 0.51
+  },
+  {
+   "model": "qwen2.5:0.5b",
+   "label": "0.5B Q4",
+   "memory_gb": 0.58,
+   "load_s": 2.5,
+   "decode_tok_s": 63.3,
+   "prefill_tok_s": 1148,
+   "ttft_long_s": 0.9,
+   "gsm8k": 0.45,
+   "mmlu": 0.31
+  }
+ ],
+ "concurrency": [
+  {
+   "ollama_parallel": 1.0,
+   "users": 1.0,
+   "requests": 2.0,
+   "ok": 2.0,
+   "wall_s": 2.47,
+   "ttft_p50_ms": 39.0,
+   "ttft_p95_ms": 51.0,
+   "latency_p50_s": 1.14,
+   "latency_p95_s": 1.28,
+   "per_request_tok_s": 37.8,
+   "aggregate_tok_s": 35.6
+  },
+  {
+   "ollama_parallel": 1.0,
+   "users": 2.0,
+   "requests": 4.0,
+   "ok": 4.0,
+   "wall_s": 7.29,
+   "ttft_p50_ms": 1790.0,
+   "ttft_p95_ms": 2146.0,
+   "latency_p50_s": 3.37,
+   "latency_p95_s": 3.85,
+   "per_request_tok_s": 25.5,
+   "aggregate_tok_s": 24.2
+  },
+  {
+   "ollama_parallel": 1.0,
+   "users": 4.0,
+   "requests": 8.0,
+   "ok": 8.0,
+   "wall_s": 12.82,
+   "ttft_p50_ms": 4741.0,
+   "ttft_p95_ms": 4875.0,
+   "latency_p50_s": 6.34,
+   "latency_p95_s": 6.44,
+   "per_request_tok_s": 28.4,
+   "aggregate_tok_s": 27.5
+  },
+  {
+   "ollama_parallel": 1.0,
+   "users": 8.0,
+   "requests": 16.0,
+   "ok": 16.0,
+   "wall_s": 26.06,
+   "ttft_p50_ms": 11299.0,
+   "ttft_p95_ms": 11499.0,
+   "latency_p50_s": 12.9,
+   "latency_p95_s": 13.11,
+   "per_request_tok_s": 27.8,
+   "aggregate_tok_s": 27.0
+  },
+  {
+   "ollama_parallel": 4.0,
+   "users": 1.0,
+   "requests": 2.0,
+   "ok": 2.0,
+   "wall_s": 2.27,
+   "ttft_p50_ms": 35.0,
+   "ttft_p95_ms": 46.0,
+   "latency_p50_s": 1.1,
+   "latency_p95_s": 1.12,
+   "per_request_tok_s": 41.1,
+   "aggregate_tok_s": 38.8
+  },
+  {
+   "ollama_parallel": 4.0,
+   "users": 2.0,
+   "requests": 4.0,
+   "ok": 4.0,
+   "wall_s": 4.46,
+   "ttft_p50_ms": 106.0,
+   "ttft_p95_ms": 106.0,
+   "latency_p50_s": 2.69,
+   "latency_p95_s": 2.7,
+   "per_request_tok_s": 15.3,
+   "aggregate_tok_s": 26.9
+  },
+  {
+   "ollama_parallel": 4.0,
+   "users": 4.0,
+   "requests": 8.0,
+   "ok": 8.0,
+   "wall_s": 6.54,
+   "ttft_p50_ms": 172.0,
+   "ttft_p95_ms": 468.0,
+   "latency_p50_s": 2.93,
+   "latency_p95_s": 3.54,
+   "per_request_tok_s": 14.3,
+   "aggregate_tok_s": 48.6
+  },
+  {
+   "ollama_parallel": 4.0,
+   "users": 8.0,
+   "requests": 16.0,
+   "ok": 16.0,
+   "wall_s": 11.81,
+   "ttft_p50_ms": 3077.0,
+   "ttft_p95_ms": 3123.0,
+   "latency_p50_s": 5.88,
+   "latency_p95_s": 5.96,
+   "per_request_tok_s": 15.4,
+   "aggregate_tok_s": 58.3
+  }
+ ]
+}
