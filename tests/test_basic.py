@@ -64,3 +64,11 @@ async def test_backend_down_returns_503(make_client):
     assert health.status_code == 503
     assert chat.status_code == 503
     assert chat.json()["error"]["type"] == "backend_unavailable"
+
+
+async def test_demo_page_is_served(make_client):
+    async with make_client() as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Stress test" in r.text

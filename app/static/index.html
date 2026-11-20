@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local LLM Server</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --border: #e2e2e0;
+    --accent: #2b6cb0; --accent-text: #ffffff; --user: #e8f0fa; --ok: #2f855a; --warn: #b7791f; --bad: #c53030;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141416; --panel: #1e1e21; --text: #ececee; --muted: #9a9aa2; --border: #303035;
+      --accent: #5a9be0; --accent-text: #0b0b0c; --user: #1f2a38; --ok: #5cc28a; --warn: #e0a84a; --bad: #ef6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; }
+  h1 { font-size: 20px; margin: 0; }
+  .status { color: var(--muted); font-size: 13px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 4px; }
+  .dot.on { background: var(--ok); } .dot.off { background: var(--bad); }
+  a { color: var(--accent); }
+  nav { display: flex; gap: 4px; margin: 16px 0 12px; border-bottom: 1px solid var(--border); }
+  nav button { background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted);
+               padding: 8px 12px; font: inherit; cursor: pointer; }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .hidden { display: none; }
+  .muted { color: var(--muted); font-size: 13px; }
+
+  /* Chat */
+  #chatLog { min-height: 260px; max-height: 60vh; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  .msg { padding: 10px 12px; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.user { background: var(--user); align-self: flex-end; max-width: 85%; }
+  .msg.ai { border: 1px solid var(--border); max-width: 95%; }
+  .msg .stats { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+  .msg.err { border-color: var(--bad); color: var(--bad); }
+  form { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+  input[type=text] { flex: 1 1 240px; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
+                     background: var(--bg); color: var(--text); font: inherit; }
+  .btn { padding: 10px 16px; border-radius: 8px; border: none; background: var(--accent); color: var(--accent-text);
+         font: inherit; cursor: pointer; }
+  .btn.secondary { background: none; border: 1px solid var(--border); color: var(--text); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  label.toggle { font-size: 13px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+
+  /* Stress test */
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  select { padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; }
+  #cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 13px; min-height: 120px; }
+  .card .state { font-weight: 600; margin-bottom: 4px; }
+  .card.waiting .state { color: var(--warn); } .card.answering .state { color: var(--accent); }
+  .card.done .state { color: var(--ok); } .card.busy .state, .card.error .state { color: var(--bad); }
+  .card .text { color: var(--muted); max-height: 80px; overflow: hidden; }
+  #summary { margin-top: 12px; font-size: 14px; }
+
+  /* How it works */
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 16px; }
+  .box { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--bg); font-size: 14px; }
+  .arrow { color: var(--muted); }
+  ul { padding-left: 20px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>⚡ Local LLM Inference Server</h1>
+    <div class="status">
+      <span class="dot" id="dot"></span><span id="statusText">connecting…</span>
+      · <a href="/docs" target="_blank">API docs</a>
+    </div>
+  </header>
+
+  <nav>
+    <button data-tab="chat" class="active">Chat</button>
+    <button data-tab="stress">Stress test</button>
+    <button data-tab="how">How it works</button>
+  </nav>
+
+  <!-- Tab 1: Chat -->
+  <section id="tab-chat" class="panel">
+    <div id="chatLog">
+      <p class="muted">Ask anything. The answer comes from a small open-source AI model (Qwen 2.5) running on this
+        server, not from an external AI service. Under each answer you'll see how fast it was.</p>
+    </div>
+    <form id="chatForm">
+      <input type="text" id="chatInput" placeholder="Type a message…" autocomplete="off" required>
+      <button class="btn" id="sendBtn">Send</button>
+      <button class="btn secondary hidden" type="button" id="stopBtn">Stop</button>
+      <label class="toggle"><input type="checkbox" id="streamToggle" checked> stream word by word</label>
+    </form>
+  </section>
+
+  <!-- Tab 2: Stress test -->
+  <section id="tab-stress" class="panel hidden">
+    <p>What happens when many people ask at the same time? This sends several questions at once.</p>
+    <p class="muted" id="capacityText"></p>
+    <div class="controls">
+      <label for="stressCount">Questions at once:</label>
+      <select id="stressCount"><option>6</option><option>12</option><option>24</option></select>
+      <button class="btn" id="stressBtn">Run stress test</button>
+    </div>
+    <div id="cards"></div>
+    <div id="summary"></div>
+  </section>
+
+  <!-- Tab 3: How it works -->
+  <section id="tab-how" class="panel hidden">
+    <div class="flow">
+      <span class="box">Your browser</span><span class="arrow">→</span>
+      <span class="box">FastAPI server<br><span class="muted">waiting line + limits</span></span><span class="arrow">→</span>
+      <span class="box">Ollama<br><span class="muted">runs the model</span></span><span class="arrow">→</span>
+      <span class="box">Qwen 2.5 (1.5B)<br><span class="muted">open-source AI model</span></span>
+    </div>
+    <ul>
+      <li><b>Own AI service:</b> a free, open-source model runs on this server. There is no paid AI API behind it.</li>
+      <li><b>Streaming:</b> words are sent the moment they are generated (Server-Sent Events), so you start reading right away.</li>
+      <li><b>Many users:</b> the server answers a few people at a time; others wait in a short line; if the line is full it replies "busy" instead of crashing.</li>
+      <li><b>Measured:</b> every answer records time-to-first-word and words (tokens) per second.</li>
+      <li><b>OpenAI-compatible:</b> code written for OpenAI's API works here by changing one URL.</li>
+    </ul>
+    <p class="muted">For engineers: Python 3.12 · FastAPI · asyncio semaphore + bounded queue · SSE · pytest + GitHub Actions.
+      Try the endpoints in the <a href="/docs" target="_blank">interactive API docs</a> or read the
+      <a href="https://github.com/Abhi-NSUT/local-llm-inference-server" target="_blank">source code</a>.</p>
+  </section>
+</div>
+
+<script>
+// ---------- Tabs ----------
+document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b === btn));
+  document.querySelectorAll("section").forEach(s => s.classList.toggle("hidden", s.id !== "tab-" + btn.dataset.tab));
+}));
+
+// ---------- Server status (polls /health every 2 s) ----------
+async function refreshStatus() {
+  const dot = document.getElementById("dot"), text = document.getElementById("statusText");
+  try {
+    const h = await (await fetch("/health")).json();
+    dot.className = "dot " + (h.status === "ok" ? "on" : "off");
+    text.textContent = `${h.model} · ${h.in_flight} answering · ${h.waiting} waiting · capacity ${h.capacity}`;
+    document.getElementById("capacityText").textContent =
+      `This server answers ${h.capacity} at a time, lets up to ${h.queue_size} wait in line, and politely turns away the rest ("busy").`;
+  } catch {
+    dot.className = "dot off";
+    text.textContent = "server offline";
+  }
+}
+refreshStatus();
+setInterval(refreshStatus, 2000);
+
+// ---------- Talking to the API ----------
+// Streams an answer. Calls onToken(text) for each piece and returns the final metrics.
+// EventSource only supports GET, so we read the POST response body as a stream instead.
+async function streamChat(messages, onToken, { maxTokens = 256, signal } = {}) {
+  const res = await fetch("/v1/chat/completions", {
+    method: "POST", signal,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, stream: true, max_tokens: maxTokens }),
+  });
+  if (res.status === 429) throw new Error("busy");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const reader = res.body.getReader(), decoder = new TextDecoder();
+  let buffer = "", metrics = null;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop();                       // keep an incomplete event for the next read
+    for (const ev of events) {
+      const data = ev.replace(/^data: /, "");
+      if (data === "[DONE]") return metrics;
+      const obj = JSON.parse(data);
+      if (obj.error) throw new Error(obj.error.type === "overloaded" ? "busy" : obj.error.message);
+      if (obj.metrics) metrics = obj.metrics;
+      const piece = obj.choices?.[0]?.delta?.content;
+      if (piece) onToken(piece);
+    }
+  }
+  return metrics;
+}
+
+// Whole answer at once (streaming off).
+async function askOnce(messages, { maxTokens = 256, signal } = {}) {
+  const res = await fetch("/v1/chat/completions", {
+    method: "POST", signal,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, stream: false, max_tokens: maxTokens }),
+  });
+  const body = await res.json();
+  if (res.status === 429) throw new Error("busy");
+  if (!res.ok) throw new Error(body.error?.message || `HTTP ${res.status}`);
+  return { text: body.choices[0].message.content, metrics: body.metrics };
+}
+
+function describe(m, ttftOverride) {
+  if (!m) return "";
+  const first = ttftOverride ?? m.ttft_ms;
+  return `⏱ first word after ${Math.round(first)} ms · ${m.tokens_per_sec} tokens/sec · ${m.completion_tokens} tokens`;
+}
+
+// ---------- Chat tab ----------
+const history = [];
+const log = document.getElementById("chatLog");
+const input = document.getElementById("chatInput");
+const sendBtn = document.getElementById("sendBtn"), stopBtn = document.getElementById("stopBtn");
+let controller = null;
+
+function addBubble(cls, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+document.getElementById("chatForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const question = input.value.trim();
+  if (!question) return;
+  input.value = "";
+  history.push({ role: "user", content: question });
+  addBubble("user", question);
+
+  const bubble = addBubble("ai", "…");
+  const textNode = document.createTextNode("");
+  const stats = document.createElement("span");
+  stats.className = "stats";
+  bubble.textContent = "";
+  bubble.append(textNode, stats);
+
+  sendBtn.disabled = true;
+  stopBtn.classList.remove("hidden");
+  controller = new AbortController();
+  const started = performance.now();
+  let answer = "";
+  try {
+    if (document.getElementById("streamToggle").checked) {
+      stats.textContent = "thinking…";
+      let firstWordMs = null;
+      const m = await streamChat(history, piece => {
+        firstWordMs ??= performance.now() - started;   // what the user actually felt, incl. network
+        answer += piece;
+        textNode.textContent = answer;
+        log.scrollTop = log.scrollHeight;
+      }, { signal: controller.signal });
+      stats.textContent = describe(m, firstWordMs);
+    } else {
+      stats.textContent = "waiting for the full answer…";
+      const r = await askOnce(history, { signal: controller.signal });
+      answer = r.text;
+      textNode.textContent = answer;
+      const waited = performance.now() - started;   // with streaming off, the first word arrives with the last
+      stats.textContent = describe(r.metrics, waited);
+    }
+    history.push({ role: "assistant", content: answer });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      stats.textContent = "stopped";
+      if (answer) history.push({ role: "assistant", content: answer });
+    } else {
+      bubble.classList.add("err");
+      stats.textContent = err.message === "busy" ? "The server is busy right now; please try again in a moment."
+                                                 : "Error: " + err.message;
+      history.pop();                               // forget the question that got no answer
+    }
+  } finally {
+    sendBtn.disabled = false;
+    stopBtn.classList.add("hidden");
+    input.focus();
+  }
+});
+stopBtn.addEventListener("click", () => controller?.abort());   // closing the stream frees the server slot
+
+// ---------- Stress test tab ----------
+const QUESTIONS = [
+  "What is an API? One sentence.", "Name three planets.", "What is 12 x 12?", "Give me a fun fact about cats.",
+  "What does a CPU do? One sentence.", "Translate 'thank you' to Spanish.", "What is Python used for? One sentence.",
+  "Name two primary colors.", "What is the capital of Japan?", "Why is the sky blue? One sentence.",
+  "Suggest a name for a pet fish.", "What is 2 to the power of 10?",
+];
+
+document.getElementById("stressBtn").addEventListener("click", async () => {
+  const btn = document.getElementById("stressBtn");
+  const count = Number(document.getElementById("stressCount").value);
+  const cards = document.getElementById("cards"), summary = document.getElementById("summary");
+  btn.disabled = true;
+  cards.innerHTML = "";
+  summary.textContent = "Running…";
+  const t0 = performance.now();
+
+  const runOne = async i => {
+    const q = QUESTIONS[i % QUESTIONS.length];
+    const card = document.createElement("div");
+    const state = document.createElement("div"), qEl = document.createElement("div"), text = document.createElement("div");
+    state.className = "state"; text.className = "text";
+    qEl.textContent = `#${i + 1}: ${q}`;
+    card.append(state, qEl, text);
+    cards.appendChild(card);
+    const set = (cls, label) => { card.className = "card " + cls; state.textContent = label; };
+    set("waiting", "⏳ waiting in line");
+
+    const start = performance.now();
+    let first = null, answer = "";
+    try {
+      const m = await streamChat([{ role: "user", content: q }], piece => {
+        if (first === null) { first = performance.now() - start; set("answering", "✍️ answering"); }
+        answer += piece;
+        text.textContent = answer;
+      }, { maxTokens: 60 });
+      const secs = (performance.now() - start) / 1000;
+      set("done", `✅ done in ${secs.toFixed(1)} s`);
+      return { ok: true, first, tokens: m?.completion_tokens ?? 0 };
+    } catch (err) {
+      if (err.message === "busy") { set("busy", "🚫 server busy (429)"); text.textContent = "Turned away right away instead of waiting forever."; }
+      else { set("error", "⚠️ error"); text.textContent = err.message; }
+      return { ok: false, busy: err.message === "busy" };
+    }
+  };
+
+  const results = await Promise.all(Array.from({ length: count }, (_, i) => runOne(i)));
+  const wall = (performance.now() - t0) / 1000;
+  const ok = results.filter(r => r.ok), busy = results.filter(r => r.busy).length;
+  const avgFirst = ok.length ? ok.reduce((s, r) => s + r.first, 0) / ok.length : 0;
+  const tokens = ok.reduce((s, r) => s + r.tokens, 0);
+  summary.textContent = `${ok.length} answered, ${busy} turned away as busy, ${count - ok.length - busy} errors · ` +
+    `total ${wall.toFixed(1)} s · average wait for first word ${(avgFirst / 1000).toFixed(1)} s · ` +
+    `${(tokens / wall).toFixed(1)} tokens/sec in total`;
+  btn.disabled = false;
+});
+</script>
+</body>
+</html>
