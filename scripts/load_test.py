@@ -20,7 +20,8 @@ def pct(values, p):
 
 
 async def one_request(client: httpx.AsyncClient, url: str, max_tokens: int) -> dict:
-    body = {"stream": True, "max_tokens": max_tokens, "temperature": 0,
+    # cache=False: we want to measure the model, not answers replayed from memory
+    body = {"stream": True, "max_tokens": max_tokens, "temperature": 0, "cache": False,
             "messages": [{"role": "user", "content": PROMPT}]}
     t0 = time.perf_counter()
     ttft, tokens = None, 0

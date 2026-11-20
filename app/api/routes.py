@@ -5,8 +5,9 @@ import time
 import uuid
 from collections.abc import Callable
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.backends.base import GenerationParams, GenerationResult, Usage
 from app.core.concurrency import QueueFullError, with_deadline
@@ -34,6 +35,23 @@ async def health(request: Request):
 @router.get("/metrics")
 async def metrics(request: Request):
     return {**STATS.summary(), "cache": request.app.state.cache.stats()}
+
+
+@router.get("/metrics/timeseries")
+async def metrics_timeseries():
+    return STATS.timeseries()
+
+
+@router.get("/metrics/details")
+async def metrics_details(request: Request):
+    """Recent requests (with their timeline), per-model comparison, and models in memory."""
+    return {"recent": list(STATS.recent), "by_model": STATS.by_model(),
+            "loaded_models": await request.app.state.backend.loaded_models()}
+
+
+@router.get("/metrics/prometheus")
+async def metrics_prometheus():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @router.get("/models")
@@ -68,9 +86,10 @@ async def chat(req: ChatRequest, request: Request):
             if cache_key else None
         return sse_response(stream_chat(backend, limiter, settings, messages, params, on_complete=save))
 
-    timer = RequestTimer()
+    timer = RequestTimer(params.model)
     try:
         async with limiter.slot():
+            timer.got_slot()
             async with asyncio.timeout(settings.request_timeout):
                 result = await backend.generate(messages, params)
     except QueueFullError:
@@ -107,7 +126,7 @@ def completion_body(result: GenerationResult, model: str, metrics: dict) -> dict
 
 
 def cached_response(hit: GenerationResult, params: GenerationParams, stream: bool):
-    metrics = {**RequestTimer().finish(hit.usage.completion_tokens, "cached"), "cached": True}
+    metrics = {**RequestTimer(params.model).finish(hit.usage.completion_tokens, "cached"), "cached": True}
     if not stream:
         return completion_body(hit, params.model, metrics)
 
@@ -158,9 +177,10 @@ async def stream_chat(backend, limiter, settings, messages: list[dict], params: 
     `on_complete(text, usage, metrics)` is called only when the answer finished normally.
     """
     cid = new_id()
-    timer, usage, pieces, status = RequestTimer(), Usage(), [], "ok"
+    timer, usage, pieces, status = RequestTimer(params.model), Usage(), [], "ok"
     try:
         async with limiter.slot():
+            timer.got_slot()
             yield sse(chunk(cid, params.model, {"role": "assistant"}))
             async for text in with_deadline(backend.stream(messages, params, usage), settings.request_timeout):
                 timer.first_token()

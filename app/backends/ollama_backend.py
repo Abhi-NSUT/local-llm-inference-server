@@ -28,6 +28,14 @@ class OllamaBackend(Backend):
         except httpx.HTTPError:
             return False
 
+    async def loaded_models(self) -> list[dict]:
+        try:
+            r = await self.client.get("/api/ps")  # what Ollama currently holds in memory
+            return [{"model": m["name"], "memory_gb": round(m["size"] / 1e9, 2),
+                     "context_tokens": m.get("context_length")} for m in r.json()["models"]]
+        except (httpx.HTTPError, KeyError, ValueError):
+            return []
+
     async def stream(self, messages, params: GenerationParams, usage: Usage):
         payload = {
             "model": params.model or self.model_id,

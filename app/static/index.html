@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Local LLM Server</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" defer></script>
 <style>
   :root {
     --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --border: #e2e2e0;
@@ -69,6 +70,19 @@
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 600; }
 
+  /* Dashboard */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .tile { border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; }
+  .tile b { font-size: 22px; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .chart-box { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+  .chart-box h4 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+  .chart-box > div { position: relative; height: 180px; }
+  .bar { display: flex; height: 12px; border-radius: 3px; overflow: hidden; background: var(--bg); min-width: 120px; }
+  .bar span { display: block; height: 100%; }
+  .key { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; }
+  td.num { text-align: right; white-space: nowrap; }
+
   /* How it works */
   .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 16px; }
   .box { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--bg); font-size: 14px; }
@@ -90,6 +104,7 @@
     <button data-tab="chat" class="active">Chat</button>
     <button data-tab="arena">Arena</button>
     <button data-tab="stress">Stress test</button>
+    <button data-tab="dashboard">Dashboard</button>
     <button data-tab="how">How it works</button>
   </nav>
 
@@ -155,6 +170,51 @@
     </div>
     <div id="cards"></div>
     <div id="summary"></div>
+  </section>
+
+  <!-- Tab: Dashboard -->
+  <section id="tab-dashboard" class="panel hidden">
+    <p class="muted">Live view of the server over the last 5 minutes, updated every 2 seconds.
+      Tip: run the stress test in another browser tab and watch the charts move.
+      Monitoring tools can read the same numbers at <a href="/metrics/prometheus" target="_blank">/metrics/prometheus</a>.</p>
+    <div class="tiles">
+      <div class="tile"><span class="muted">Requests</span><b id="tileRequests">–</b></div>
+      <div class="tile"><span class="muted">Cache hit rate</span><b id="tileCache">–</b></div>
+      <div class="tile"><span class="muted">Errors / busy</span><b id="tileErrors">–</b></div>
+      <div class="tile"><span class="muted">Uptime</span><b id="tileUptime">–</b></div>
+      <div class="tile"><span class="muted">First word p50 / p95</span><b id="tileTtft">–</b></div>
+      <div class="tile"><span class="muted">Total time p50 / p95</span><b id="tileLatency">–</b></div>
+    </div>
+    <div class="charts">
+      <div class="chart-box"><h4>Tokens generated per second</h4><div><canvas id="chartTokens"></canvas></div></div>
+      <div class="chart-box"><h4>Requests finished per second</h4><div><canvas id="chartRequests"></canvas></div></div>
+      <div class="chart-box"><h4>Wait for first word (median, ms)</h4><div><canvas id="chartTtft"></canvas></div></div>
+      <div class="chart-box"><h4>Requests answering vs. waiting</h4><div><canvas id="chartQueue"></canvas></div></div>
+    </div>
+    <p class="muted">Rates are averaged over the previous 10 seconds. p50 = half of requests were faster;
+      p95 = the slowest 5% took longer than this.</p>
+
+    <h3>Models</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Model</th><th>In memory</th><th>Requests</th><th>Median first word</th><th>Avg speed</th></tr></thead>
+        <tbody id="modelsBody"></tbody>
+      </table>
+    </div>
+
+    <h3>Recent requests</h3>
+    <p class="muted">Each bar is one request, split into
+      <span class="key" style="background: var(--warn)"></span> waiting in line,
+      <span class="key" style="background: var(--muted)"></span> reading the prompt (until the first word), and
+      <span class="key" style="background: var(--accent)"></span> writing the answer.
+      Bars share one time scale, so longer bars took longer.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Model</th><th>Status</th><th style="width: 35%">Timeline</th>
+          <th>First word</th><th>Total</th><th>Tokens</th><th>Speed</th></tr></thead>
+        <tbody id="recentBody"></tbody>
+      </table>
+    </div>
   </section>
 
   <!-- Tab 3: How it works -->
@@ -431,6 +491,121 @@ voteRow.addEventListener("click", async e => {
     loadLeaderboard();
   }
 });
+
+// ---------- Dashboard tab ----------
+let charts = null;
+
+function makeChart(id, series) {
+  const css = getComputedStyle(document.documentElement);
+  const muted = css.getPropertyValue("--muted").trim(), grid = css.getPropertyValue("--border").trim();
+  return new Chart(document.getElementById(id), {
+    type: "line",
+    data: { labels: [], datasets: series.map(([label, colorVar]) => {
+      const color = css.getPropertyValue(colorVar).trim();
+      return { label, data: [], borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2, tension: 0.3 };
+    }) },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false, spanGaps: true,
+      plugins: { legend: { display: series.length > 1, labels: { color: muted, boxWidth: 12 } } },
+      scales: {
+        x: { ticks: { color: muted, maxTicksLimit: 6 }, grid: { display: false } },
+        y: { beginAtZero: true, ticks: { color: muted, maxTicksLimit: 5 }, grid: { color: grid } },
+      },
+    },
+  });
+}
+
+// For each second: average (or median) over the previous `win` seconds, so the lines are readable.
+const rollingAvg = (pts, key, win = 10) =>
+  pts.map((_, i) => pts.slice(Math.max(0, i - win + 1), i + 1).reduce((s, p) => s + p[key], 0) / win);
+const rollingMedian = (pts, win = 10) => pts.map((_, i) => {
+  const v = pts.slice(Math.max(0, i - win + 1), i + 1).flatMap(p => p.ttft_ms).sort((a, b) => a - b);
+  return v.length ? Math.round(v[Math.floor(v.length / 2)]) : null;
+});
+
+async function refreshDashboard() {
+  if (document.getElementById("tab-dashboard").classList.contains("hidden") || !window.Chart) return;
+  charts ??= {
+    tokens: makeChart("chartTokens", [["tokens/sec", "--accent"]]),
+    requests: makeChart("chartRequests", [["requests/sec", "--accent"]]),
+    ttft: makeChart("chartTtft", [["first word (ms)", "--accent"]]),
+    queue: makeChart("chartQueue", [["answering", "--accent"], ["waiting", "--warn"]]),
+  };
+  const [ts, summary, details] = await Promise.all([fetch("/metrics/timeseries").then(r => r.json()),
+                                                    fetch("/metrics").then(r => r.json()),
+                                                    fetch("/metrics/details").then(r => r.json())]);
+  renderModels(details);
+  renderRecent(details.recent);
+  const ms = v => v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${Math.round(v)} ms`;
+  document.getElementById("tileTtft").textContent = `${ms(summary.ttft_ms.p50)} / ${ms(summary.ttft_ms.p95)}`;
+  document.getElementById("tileLatency").textContent = `${ms(summary.latency_ms.p50)} / ${ms(summary.latency_ms.p95)}`;
+  const pts = ts.points, now = pts.length ? pts[pts.length - 1].t : 0;
+  const labels = pts.map(p => `${p.t - now}s`);
+  const update = (chart, ...data) => {
+    chart.data.labels = labels;
+    data.forEach((d, i) => chart.data.datasets[i].data = d);
+    chart.update();
+  };
+  update(charts.tokens, rollingAvg(pts, "tokens"));
+  update(charts.requests, rollingAvg(pts, "requests"));
+  update(charts.ttft, rollingMedian(pts));
+  update(charts.queue, pts.map(p => p.in_flight), pts.map(p => p.waiting));
+
+  const counts = summary.requests_by_status;
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const errors = (counts.error || 0) + (counts.timeout || 0) + (counts.rejected || 0);
+  document.getElementById("tileRequests").textContent = total;
+  document.getElementById("tileCache").textContent = `${Math.round(summary.cache.hit_rate * 100)}%`;
+  document.getElementById("tileErrors").textContent = errors;
+  const m = Math.floor(ts.uptime_s / 60);
+  document.getElementById("tileUptime").textContent = m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+}
+function fillRow(tbody, cells) {
+  const tr = tbody.insertRow();
+  for (const c of cells) {
+    const td = tr.insertCell();
+    if (c instanceof Node) td.appendChild(c); else td.textContent = c;
+  }
+  return tr;
+}
+
+function renderModels({ by_model, loaded_models }) {
+  const body = document.getElementById("modelsBody");
+  body.innerHTML = "";
+  const memory = Object.fromEntries(loaded_models.map(m => [m.model, m.memory_gb]));
+  const names = [...new Set([...loaded_models.map(m => m.model), ...by_model.map(m => m.model)])];
+  for (const name of names) {
+    const s = by_model.find(m => m.model === name);
+    fillRow(body, [name, name in memory ? `${memory[name]} GB` : "not loaded", s ? s.requests : 0,
+                   s ? `${Math.round(s.ttft_ms_p50)} ms` : "–", s ? `${s.tokens_per_sec_avg} tok/s` : "–"]);
+  }
+}
+
+function renderRecent(recent) {
+  const body = document.getElementById("recentBody");
+  body.innerHTML = "";
+  const scale = Math.max(1, ...recent.map(r => r.latency_ms));  // longest request = full width
+  for (const r of recent) {
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.title = `waiting ${Math.round(r.queue_ms)} ms · reading prompt ${Math.round(r.ttft_ms - r.queue_ms)} ms · ` +
+                `writing ${Math.round(r.latency_ms - r.ttft_ms)} ms`;
+    for (const [length, color] of [[r.queue_ms, "--warn"], [r.ttft_ms - r.queue_ms, "--muted"],
+                                   [r.latency_ms - r.ttft_ms, "--accent"]]) {
+      const seg = document.createElement("span");
+      seg.style.width = `${(100 * Math.max(0, length)) / scale}%`;
+      seg.style.background = `var(${color})`;
+      bar.appendChild(seg);
+    }
+    const tr = fillRow(body, [new Date(r.time * 1000).toLocaleTimeString(), r.model ?? "–", r.status, bar,
+                              `${Math.round(r.ttft_ms)} ms`, `${(r.latency_ms / 1000).toFixed(1)} s`,
+                              r.completion_tokens, r.status === "cached" ? "–" : `${r.tokens_per_sec} tok/s`]);
+    for (const i of [4, 5, 6, 7]) tr.cells[i].className = "num";
+  }
+}
+
+setInterval(refreshDashboard, 2000);
+document.querySelector('nav button[data-tab="dashboard"]').addEventListener("click", refreshDashboard);
 
 // ---------- Stress test tab ----------
 const QUESTIONS = [

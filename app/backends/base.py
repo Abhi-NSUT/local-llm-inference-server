@@ -40,6 +40,10 @@ class Backend(ABC):
     @abstractmethod
     async def health(self) -> bool: ...
 
+    async def loaded_models(self) -> list[dict]:
+        """Models currently in memory, with their size. Empty if the backend can't tell."""
+        return []
+
     @abstractmethod
     def stream(self, messages: list[dict], params: GenerationParams, usage: Usage) -> AsyncIterator[str]:
         """Yield pieces of text as the model produces them, and fill `usage` at the end."""

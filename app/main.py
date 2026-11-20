@@ -1,4 +1,5 @@
 """App entry point: `uv run uvicorn app.main:app`."""
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,6 +14,15 @@ from app.backends import get_backend
 from app.config import Settings
 from app.core.cache import ResponseCache
 from app.core.concurrency import ConcurrencyLimiter
+from app.core.metrics import STATS
+
+
+async def sample_every_second(app: FastAPI):
+    """Background task: record queue length each second for the live dashboard."""
+    while True:
+        limiter, cache = app.state.limiter, app.state.cache
+        STATS.sample_queue(limiter.in_flight, limiter.waiting, cache.stats()["size"])
+        await asyncio.sleep(1)
 
 
 @asynccontextmanager
@@ -25,7 +35,9 @@ async def lifespan(app: FastAPI):
     app.state.cache = ResponseCache(settings.cache_max_entries, settings.cache_ttl_seconds)
     app.state.arena = ArenaStore(settings.arena_db)
     await app.state.backend.startup()  # once at startup, not per request
+    sampler = asyncio.create_task(sample_every_second(app))
     yield
+    sampler.cancel()
     await app.state.backend.shutdown()
     app.state.arena.db.close()
 
