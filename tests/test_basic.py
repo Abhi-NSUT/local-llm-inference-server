@@ -81,3 +81,11 @@ async def test_non_stream_speed_is_realistic(make_client):
     m = r.json()["metrics"]
     assert 20 < m["tokens_per_sec"] < 60
     assert m["ttft_ms"] == m["latency_ms"]  # without streaming, the first word comes with the last
+
+
+async def test_benchmark_summary_is_served(make_client):
+    async with make_client() as c:
+        r = await c.get("/bench.json")
+    data = r.json()
+    assert {"machine", "models", "concurrency"} <= set(data)
+    assert all({"label", "decode_tok_s", "gsm8k", "mmlu"} <= set(m) for m in data["models"])

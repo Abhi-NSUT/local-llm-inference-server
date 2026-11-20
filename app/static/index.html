@@ -9,11 +9,13 @@
   :root {
     --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --border: #e2e2e0;
     --accent: #2b6cb0; --accent-text: #ffffff; --user: #e8f0fa; --ok: #2f855a; --warn: #b7791f; --bad: #c53030;
+    --series-1: #2a78d6; --series-2: #eb6834;  /* chart series, checked for color-blind separation */
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #141416; --panel: #1e1e21; --text: #ececee; --muted: #9a9aa2; --border: #303035;
       --accent: #5a9be0; --accent-text: #0b0b0c; --user: #1f2a38; --ok: #5cc28a; --warn: #e0a84a; --bad: #ef6b6b;
+      --series-1: #3987e5; --series-2: #d95926;
     }
   }
   * { box-sizing: border-box; }
@@ -105,6 +107,7 @@
     <button data-tab="arena">Arena</button>
     <button data-tab="stress">Stress test</button>
     <button data-tab="dashboard">Dashboard</button>
+    <button data-tab="bench">Benchmarks</button>
     <button data-tab="how">How it works</button>
   </nav>
 
@@ -215,6 +218,45 @@
         <tbody id="recentBody"></tbody>
       </table>
     </div>
+  </section>
+
+  <!-- Tab: Benchmarks -->
+  <section id="tab-bench" class="panel hidden">
+    <p><b>Question:</b> how far can a small AI model go on an ordinary laptop, and what does compressing it cost?
+      Compression stores each of the model's numbers in fewer bits: FP16 (16 bits, original), Q8 (8 bits), Q4 (4 bits).</p>
+    <p class="muted" id="benchMachine"></p>
+    <h3>What I found</h3>
+    <ul>
+      <li><b>Compressing the model makes it write faster but read slower.</b> Writing each word means moving all
+        the model's numbers through memory, so smaller numbers help. Reading a long prompt is limited by computation,
+        and compressed numbers must be unpacked first, so it gets slower.</li>
+      <li><b>Compression costs math accuracy, not general knowledge.</b> On multi-step math, accuracy drops step by step
+        (FP16 → Q8 → Q4); on multiple-choice knowledge questions all three are within noise.
+        Example: asked how much Ted <i>spent</i>, the Q4 model computed $66 correctly, then answered how much he had
+        <i>left</i> ($134).</li>
+      <li><b>Serving 4 requests at once more than doubles total output</b>, but each person's answer is written about
+        half as fast.</li>
+    </ul>
+    <div class="charts">
+      <div class="chart-box"><h4>Writing speed (tokens/sec, higher is better)</h4><div><canvas id="benchDecode"></canvas></div></div>
+      <div class="chart-box"><h4>Reading a 1,000-token prompt (tokens/sec)</h4><div><canvas id="benchPrefill"></canvas></div></div>
+      <div class="chart-box"><h4>Accuracy on 100 questions each (%)</h4><div><canvas id="benchAccuracy"></canvas></div></div>
+      <div class="chart-box"><h4>Total output with more users (tokens/sec)</h4><div><canvas id="benchThroughput"></canvas></div></div>
+      <div class="chart-box"><h4>Wait for first word with more users (seconds, median)</h4><div><canvas id="benchWait"></canvas></div></div>
+    </div>
+    <h3>All numbers</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Model</th><th>Memory</th><th>Cold start</th><th>Writing</th><th>Reading long prompt</th>
+          <th>First word (long prompt)</th><th>Math (GSM8K)</th><th>Knowledge (MMLU)</th></tr></thead>
+        <tbody id="benchBody"></tbody>
+      </table>
+    </div>
+    <p class="muted">How to read this: 100 questions give roughly ±9 points of uncertainty, so small differences are
+      noise. For comparison, always answering "A" would score 34% on this MMLU sample; the 0.5B model scores 31% because
+      it picks "D" 58% of the time. Speeds are medians of 5 runs, with randomness turned off.
+      Raw data and scripts: <code>bench/</code> in the
+      <a href="https://github.com/Abhi-NSUT/local-llm-inference-server/tree/main/bench" target="_blank">repository</a>.</p>
   </section>
 
   <!-- Tab 3: How it works -->
@@ -495,22 +537,28 @@ voteRow.addEventListener("click", async e => {
 // ---------- Dashboard tab ----------
 let charts = null;
 
-function makeChart(id, series) {
+// One helper for every chart on the page: line (default) or bar, colors from CSS variables.
+function makeChart(id, series, { type = "line", horizontal = false, points = false, valueTitle } = {}) {
   const css = getComputedStyle(document.documentElement);
   const muted = css.getPropertyValue("--muted").trim(), grid = css.getPropertyValue("--border").trim();
+  const valueAxis = { beginAtZero: true, ticks: { color: muted, maxTicksLimit: 5 }, grid: { color: grid },
+                      title: { display: !!valueTitle, text: valueTitle, color: muted } };
+  const categoryAxis = { ticks: { color: muted, maxTicksLimit: 6 }, grid: { display: false } };
   return new Chart(document.getElementById(id), {
-    type: "line",
+    type,
     data: { labels: [], datasets: series.map(([label, colorVar]) => {
       const color = css.getPropertyValue(colorVar).trim();
-      return { label, data: [], borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2, tension: 0.3 };
+      return type === "bar"
+        ? { label, data: [], backgroundColor: color, borderRadius: 4, maxBarThickness: 28 }
+        : { label, data: [], borderColor: color, backgroundColor: color, borderWidth: 2, tension: 0.3,
+            pointRadius: points ? 4 : 0, pointHoverRadius: 6 };
     }) },
     options: {
       animation: false, responsive: true, maintainAspectRatio: false, spanGaps: true,
+      indexAxis: horizontal ? "y" : "x",
+      interaction: { mode: "index", intersect: false },  // hover anywhere on a column shows its values
       plugins: { legend: { display: series.length > 1, labels: { color: muted, boxWidth: 12 } } },
-      scales: {
-        x: { ticks: { color: muted, maxTicksLimit: 6 }, grid: { display: false } },
-        y: { beginAtZero: true, ticks: { color: muted, maxTicksLimit: 5 }, grid: { color: grid } },
-      },
+      scales: horizontal ? { x: valueAxis, y: categoryAxis } : { x: categoryAxis, y: valueAxis },
     },
   });
 }
@@ -606,6 +654,48 @@ function renderRecent(recent) {
 
 setInterval(refreshDashboard, 2000);
 document.querySelector('nav button[data-tab="dashboard"]').addEventListener("click", refreshDashboard);
+
+// ---------- Benchmarks tab ----------
+let benchDrawn = false;
+
+async function drawBenchmarks() {
+  if (benchDrawn || !window.Chart) return;
+  benchDrawn = true;
+  const b = await (await fetch("/bench.json")).json();
+  const m = b.machine;
+  document.getElementById("benchMachine").textContent =
+    `Measured on ${m.chip} with ${m.ram_gb} GB RAM, Ollama ${m.ollama}. Same questions for every model, randomness off.`;
+
+  const labels = b.models.map(x => x.label);
+  const fill = (chart, xLabels, ...data) => {
+    chart.data.labels = xLabels;
+    data.forEach((d, i) => chart.data.datasets[i].data = d);
+    chart.update();
+  };
+  const bar = id => makeChart(id, [["tokens/sec", "--series-1"]], { type: "bar", horizontal: true });
+  fill(bar("benchDecode"), labels, b.models.map(x => x.decode_tok_s));
+  fill(bar("benchPrefill"), labels, b.models.map(x => x.prefill_tok_s));
+  fill(makeChart("benchAccuracy", [["Math (GSM8K)", "--series-1"], ["Knowledge (MMLU)", "--series-2"]], { type: "bar" }),
+       labels, b.models.map(x => x.gsm8k * 100), b.models.map(x => x.mmlu * 100));
+
+  // Concurrency: one line per Ollama setting, x = number of users.
+  const users = [...new Set(b.concurrency.map(r => r.users))];
+  const series = (parallel, key, scale = 1) =>
+    users.map(u => b.concurrency.find(r => r.users === u && r.ollama_parallel === parallel)[key] * scale);
+  const lines = [["4 at a time", "--series-1"], ["1 at a time", "--series-2"]];
+  const userLabels = users.map(u => `${u} user${u > 1 ? "s" : ""}`);
+  fill(makeChart("benchThroughput", lines, { points: true }), userLabels,
+       series(4, "aggregate_tok_s"), series(1, "aggregate_tok_s"));
+  fill(makeChart("benchWait", lines, { points: true }), userLabels,
+       series(4, "ttft_p50_ms", 0.001), series(1, "ttft_p50_ms", 0.001));
+
+  const body = document.getElementById("benchBody");
+  for (const x of b.models) {
+    fillRow(body, [x.label, `${x.memory_gb} GB`, `${x.load_s} s`, `${x.decode_tok_s} tok/s`, `${x.prefill_tok_s} tok/s`,
+                   `${x.ttft_long_s} s`, `${Math.round(x.gsm8k * 100)}%`, `${Math.round(x.mmlu * 100)}%`]);
+  }
+}
+document.querySelector('nav button[data-tab="bench"]').addEventListener("click", drawBenchmarks);
 
 // ---------- Stress test tab ----------
 const QUESTIONS = [
