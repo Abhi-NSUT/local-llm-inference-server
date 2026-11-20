@@ -16,6 +16,7 @@ def make_client(monkeypatch):
     @asynccontextmanager
     async def _make(delay: float = 0.0, **env):
         monkeypatch.setenv("BACKEND", "fake")
+        monkeypatch.setenv("MODEL_ID", "fake-model")
         for key, value in env.items():
             monkeypatch.setenv(key, str(value))
         async with LifespanManager(app):

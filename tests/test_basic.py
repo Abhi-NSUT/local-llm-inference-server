@@ -72,3 +72,12 @@ async def test_demo_page_is_served(make_client):
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
     assert "Stress test" in r.text
+
+
+async def test_non_stream_speed_is_realistic(make_client):
+    # 6 words with 0.02 s between them: about 50 tokens/sec, never thousands.
+    async with make_client(delay=0.02) as c:
+        r = await c.post("/v1/chat/completions", json=chat_body())
+    m = r.json()["metrics"]
+    assert 20 < m["tokens_per_sec"] < 60
+    assert m["ttft_ms"] == m["latency_ms"]  # without streaming, the first word comes with the last

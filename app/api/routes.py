@@ -38,15 +38,20 @@ async def metrics():
 @router.get("/models")
 @router.get("/v1/models")
 async def models(request: Request):
-    model_id = request.app.state.backend.model_id
-    return {"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "local"}]}
+    return {"object": "list", "data": [{"id": m, "object": "model", "owned_by": "local"}
+                                       for m in request.app.state.settings.models]}
 
 
 @router.post("/v1/chat/completions")
 async def chat(req: ChatRequest, request: Request):
     state = request.app.state
     backend, limiter, settings = state.backend, state.limiter, state.settings
-    params = GenerationParams(min(req.max_tokens, settings.max_tokens_limit), req.temperature, req.top_p)
+    if req.model and req.model not in settings.models:
+        return error(400, "invalid_request", f"Unknown model '{req.model}'. Available: {settings.models}")
+    json_format = req.response_format.to_backend_format() if req.response_format else None
+    params = GenerationParams(max_tokens=min(req.max_tokens, settings.max_tokens_limit),
+                              temperature=req.temperature, top_p=req.top_p,
+                              model=req.model or settings.model_id, format=json_format)
     messages = [m.model_dump() for m in req.messages]
 
     if limiter.is_full():  # quick "server busy" before doing any work
@@ -71,19 +76,29 @@ async def chat(req: ChatRequest, request: Request):
     except Exception as e:  # e.g. Ollama not running
         timer.finish(0, "error")
         return error(503, "backend_unavailable", str(e) or type(e).__name__)
-    timer.first_token()  # non-streaming: the first token arrives together with the rest
     u = result.usage
+    metrics = timer.finish(u.completion_tokens)
+    if json_format:
+        metrics["valid_json"] = is_json(result.text)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": backend.model_id,
+        "model": params.model,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": result.text},
                      "finish_reason": result.finish_reason}],
         "usage": {"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens,
                   "total_tokens": u.prompt_tokens + u.completion_tokens},
-        "metrics": timer.finish(u.completion_tokens),
+        "metrics": metrics,
     }
+
+
+def is_json(text: str) -> bool:
+    try:
+        json.loads(text)
+        return True
+    except ValueError:
+        return False
 
 
 def sse(data) -> str:
@@ -101,7 +116,7 @@ async def stream_chat(backend, limiter, settings, messages: list[dict], params: 
 
     def chunk(delta: dict, finish: str | None = None, **extra) -> dict:
         return {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
-                "model": backend.model_id,
+                "model": params.model,
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}], **extra}
 
     timer, usage, n_chunks, status = RequestTimer(), Usage(), 0, "ok"
@@ -134,6 +149,6 @@ async def stream_chat(backend, limiter, settings, messages: list[dict], params: 
 @router.post("/v1/generate")
 async def generate(req: GenerateRequest, request: Request):
     """Plain prompt -> text. Internally it is a one-message chat."""
-    chat_req = ChatRequest(messages=[{"role": "user", "content": req.prompt}],
+    chat_req = ChatRequest(model=req.model, messages=[{"role": "user", "content": req.prompt}],
                            max_tokens=req.max_tokens, temperature=req.temperature, stream=req.stream)
     return await chat(chat_req, request)

@@ -30,7 +30,7 @@ class OllamaBackend(Backend):
 
     async def stream(self, messages, params: GenerationParams, usage: Usage):
         payload = {
-            "model": self.model_id,
+            "model": params.model or self.model_id,
             "messages": messages,
             "stream": True,
             "options": {
@@ -39,6 +39,10 @@ class OllamaBackend(Backend):
                 "top_p": params.top_p,
             },
         }
+        if params.format:
+            # Ollama restricts which tokens the model may pick so the output always parses as JSON
+            # (and matches the schema, if one is given). This is called constrained decoding.
+            payload["format"] = params.format
         # Ollama streams NDJSON: one JSON object per line; the last one has "done": true.
         async with self.client.stream("POST", "/api/chat", json=payload) as resp:
             resp.raise_for_status()

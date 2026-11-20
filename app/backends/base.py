@@ -9,6 +9,8 @@ class GenerationParams:
     max_tokens: int = 256
     temperature: float = 0.7
     top_p: float = 0.9
+    model: str | None = None              # None = the backend's default model
+    format: str | dict | None = None      # "json" or a JSON schema -> output must be valid JSON
 
 
 @dataclass

@@ -17,7 +17,8 @@ class FakeBackend(Backend):
 
     async def stream(self, messages, params: GenerationParams, usage: Usage):
         usage.prompt_tokens = sum(len(m["content"].split()) for m in messages)
-        for word in self.words[: params.max_tokens]:
+        words = ['{"ok": ', "true}"] if params.format else self.words
+        for word in words[: params.max_tokens]:
             await asyncio.sleep(self.delay)
             usage.completion_tokens += 1
             yield word

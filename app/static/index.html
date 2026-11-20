@@ -95,6 +95,11 @@
       <button class="btn secondary hidden" type="button" id="stopBtn">Stop</button>
       <label class="toggle"><input type="checkbox" id="streamToggle" checked> stream word by word</label>
     </form>
+    <div class="controls" style="margin: 10px 0 0">
+      <label class="toggle" for="modelSelect">Model:</label>
+      <select id="modelSelect"></select>
+      <button class="btn secondary" type="button" id="jsonBtn">Try JSON mode</button>
+    </div>
   </section>
 
   <!-- Tab 2: Stress test -->
@@ -158,11 +163,11 @@ setInterval(refreshStatus, 2000);
 // ---------- Talking to the API ----------
 // Streams an answer. Calls onToken(text) for each piece and returns the final metrics.
 // EventSource only supports GET, so we read the POST response body as a stream instead.
-async function streamChat(messages, onToken, { maxTokens = 256, signal } = {}) {
+async function streamChat(messages, onToken, { maxTokens = 256, signal, model } = {}) {
   const res = await fetch("/v1/chat/completions", {
     method: "POST", signal,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, stream: true, max_tokens: maxTokens }),
+    body: JSON.stringify({ messages, stream: true, max_tokens: maxTokens, model }),
   });
   if (res.status === 429) throw new Error("busy");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -189,11 +194,11 @@ async function streamChat(messages, onToken, { maxTokens = 256, signal } = {}) {
 }
 
 // Whole answer at once (streaming off).
-async function askOnce(messages, { maxTokens = 256, signal } = {}) {
+async function askOnce(messages, { maxTokens = 256, signal, model, responseFormat } = {}) {
   const res = await fetch("/v1/chat/completions", {
     method: "POST", signal,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, stream: false, max_tokens: maxTokens }),
+    body: JSON.stringify({ messages, stream: false, max_tokens: maxTokens, model, response_format: responseFormat }),
   });
   const body = await res.json();
   if (res.status === 429) throw new Error("busy");
@@ -252,11 +257,11 @@ document.getElementById("chatForm").addEventListener("submit", async e => {
         answer += piece;
         textNode.textContent = answer;
         log.scrollTop = log.scrollHeight;
-      }, { signal: controller.signal });
+      }, { signal: controller.signal, model: modelSelect.value });
       stats.textContent = describe(m, firstWordMs);
     } else {
       stats.textContent = "waiting for the full answer…";
-      const r = await askOnce(history, { signal: controller.signal });
+      const r = await askOnce(history, { signal: controller.signal, model: modelSelect.value });
       answer = r.text;
       textNode.textContent = answer;
       const waited = performance.now() - started;   // with streaming off, the first word arrives with the last
@@ -280,6 +285,38 @@ document.getElementById("chatForm").addEventListener("submit", async e => {
   }
 });
 stopBtn.addEventListener("click", () => controller?.abort());   // closing the stream frees the server slot
+
+// ---------- Model picker ----------
+const modelSelect = document.getElementById("modelSelect");
+fetch("/v1/models").then(r => r.json()).then(list => {
+  for (const m of list.data) modelSelect.add(new Option(m.id, m.id));
+});
+
+// ---------- JSON mode example ----------
+// The schema forces the model to answer with exactly these fields (constrained decoding).
+const PERSON_SCHEMA = {
+  type: "object",
+  properties: { name: { type: "string" }, age: { type: "integer" }, city: { type: "string" } },
+  required: ["name", "age", "city"],
+};
+document.getElementById("jsonBtn").addEventListener("click", async () => {
+  const text = "Hi, I'm Priya, I turned 27 last month and I live in Pune.";
+  addBubble("user", `Extract name, age and city as JSON:\n"${text}"`);
+  const bubble = addBubble("ai", "…");
+  try {
+    const r = await askOnce([{ role: "user", content: `Extract the person's name, age and city from: ${text}` }],
+      { model: modelSelect.value, maxTokens: 100,
+        responseFormat: { type: "json_schema", json_schema: { name: "person", schema: PERSON_SCHEMA } } });
+    bubble.textContent = JSON.stringify(JSON.parse(r.text), null, 2);
+    const stats = document.createElement("span");
+    stats.className = "stats";
+    stats.textContent = `✅ valid JSON matching the schema · ${describe(r.metrics)}`;
+    bubble.appendChild(stats);
+  } catch (err) {
+    bubble.classList.add("err");
+    bubble.textContent = "Error: " + err.message;
+  }
+});
 
 // ---------- Stress test tab ----------
 const QUESTIONS = [

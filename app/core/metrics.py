@@ -16,14 +16,19 @@ class RequestTimer:
 
     def finish(self, completion_tokens: int, status: str = "ok") -> dict:
         t_end = time.perf_counter()
-        t_first = self.t_first or t_end
-        decode_time = max(t_end - t_first, 1e-6)  # time spent writing tokens after the first one
+        t_first = self.t_first or t_end  # non-streaming: the first word arrives with the last one
+        if self.t_first and t_end > self.t_first and completion_tokens > 1:
+            # Streaming: writing speed after the first token (excludes waiting + prompt reading).
+            tps = (completion_tokens - 1) / (t_end - self.t_first)
+        else:
+            # Non-streaming: we only know the total time.
+            tps = completion_tokens / max(t_end - self.t0, 1e-6)
         m = {
             "status": status,
             "ttft_ms": round((t_first - self.t0) * 1000, 1),
             "latency_ms": round((t_end - self.t0) * 1000, 1),
             "completion_tokens": completion_tokens,
-            "tokens_per_sec": round(max(completion_tokens - 1, 0) / decode_time, 1),
+            "tokens_per_sec": round(tps, 1),
         }
         log.info("request_done %s", m)
         STATS.record(m)

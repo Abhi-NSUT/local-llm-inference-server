@@ -8,7 +8,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     backend: Literal["ollama", "fake"] = "ollama"
-    model_id: str = "qwen2.5:1.5b"
+    model_id: str = "qwen2.5:1.5b"  # default model when a request doesn't name one
+    # Extra models a request may choose, as JSON, e.g. ALLOWED_MODELS='["qwen2.5:0.5b"]'
+    allowed_models: list[str] = []
     ollama_url: str = "http://localhost:11434"
 
     max_concurrency: int = 4        # how many answers are generated at the same time
@@ -17,3 +19,8 @@ class Settings(BaseSettings):
     max_tokens_limit: int = 2048    # upper bound for max_tokens in a request
 
     log_level: str = "INFO"
+
+    @property
+    def models(self) -> list[str]:
+        """Every model a request may use; the default model is always first."""
+        return [self.model_id] + [m for m in self.allowed_models if m != self.model_id]
