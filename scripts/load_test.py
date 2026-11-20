@@ -47,7 +47,32 @@ async def user(client, url, n, max_tokens, results):
         results.append(await one_request(client, url, max_tokens))
 
 
-async def main():
+async def run_load(url: str, users: int, requests: int, max_tokens: int) -> dict:
+    """Run the simulated users and return a summary (also used by bench/run_concurrency.py)."""
+    results: list[dict] = []
+    t0 = time.perf_counter()
+    async with httpx.AsyncClient(base_url=url, timeout=300) as client:
+        await asyncio.gather(*(user(client, "/v1/chat/completions", requests, max_tokens, results)
+                               for _ in range(users)))
+    wall = time.perf_counter() - t0
+
+    ok = [r for r in results if r["status"] == "ok"]
+    statuses: dict[str, int] = {}
+    for r in results:
+        statuses[r["status"]] = statuses.get(r["status"], 0) + 1
+    per_req_tps = [r["tokens"] / max(r["latency"] - r["ttft"], 1e-6) for r in ok]
+    return {
+        "users": users, "requests": len(results), "ok": len(ok), "statuses": statuses, "wall_s": round(wall, 2),
+        "ttft_p50_ms": round(pct([r["ttft"] for r in ok], 50) * 1000),
+        "ttft_p95_ms": round(pct([r["ttft"] for r in ok], 95) * 1000),
+        "latency_p50_s": round(pct([r["latency"] for r in ok], 50), 2),
+        "latency_p95_s": round(pct([r["latency"] for r in ok], 95), 2),
+        "per_request_tok_s": round(sum(per_req_tps) / len(per_req_tps), 1) if ok else 0.0,
+        "aggregate_tok_s": round(sum(r["tokens"] for r in ok) / wall, 1),
+    }
+
+
+def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8000")
     ap.add_argument("--users", type=int, default=4)
@@ -55,25 +80,13 @@ async def main():
     ap.add_argument("--max-tokens", type=int, default=64)
     a = ap.parse_args()
 
-    results: list[dict] = []
-    t0 = time.perf_counter()
-    async with httpx.AsyncClient(base_url=a.url, timeout=300) as client:
-        await asyncio.gather(*(user(client, "/v1/chat/completions", a.requests, a.max_tokens, results)
-                               for _ in range(a.users)))
-    wall = time.perf_counter() - t0
-
-    ok = [r for r in results if r["status"] == "ok"]
-    statuses: dict[str, int] = {}
-    for r in results:
-        statuses[r["status"]] = statuses.get(r["status"], 0) + 1
-    total_tokens = sum(r["tokens"] for r in ok)
-    per_req_tps = [r["tokens"] / max(r["latency"] - r["ttft"], 1e-6) for r in ok]
-    print(f"users={a.users} requests={len(results)} wall={wall:.1f}s statuses={statuses}")
-    if ok:
-        print(f"TTFT     p50={pct([r['ttft'] for r in ok], 50) * 1000:.0f}ms  p95={pct([r['ttft'] for r in ok], 95) * 1000:.0f}ms")
-        print(f"latency  p50={pct([r['latency'] for r in ok], 50):.2f}s  p95={pct([r['latency'] for r in ok], 95):.2f}s")
-        print(f"tok/s per request (avg)={sum(per_req_tps) / len(per_req_tps):.1f}   aggregate tok/s={total_tokens / wall:.1f}")
+    s = asyncio.run(run_load(a.url, a.users, a.requests, a.max_tokens))
+    print(f"users={s['users']} requests={s['requests']} wall={s['wall_s']}s statuses={s['statuses']}")
+    if s["ok"]:
+        print(f"TTFT     p50={s['ttft_p50_ms']}ms  p95={s['ttft_p95_ms']}ms")
+        print(f"latency  p50={s['latency_p50_s']}s  p95={s['latency_p95_s']}s")
+        print(f"tok/s per request (avg)={s['per_request_tok_s']}   aggregate tok/s={s['aggregate_tok_s']}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
