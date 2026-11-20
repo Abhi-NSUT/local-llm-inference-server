@@ -1,0 +1,9 @@
+model,dataset,correct,total,accuracy,no_answer_found,avg_gen_tokens,minutes
+qwen2.5:1.5b-instruct-fp16,gsm8k,78,100,0.78,0,238.5,8.0
+qwen2.5:1.5b-instruct-fp16,mmlu,50,100,0.5,0,2.0,0.8
+qwen2.5:1.5b-instruct-q8_0,gsm8k,75,100,0.75,0,239.8,7.1
+qwen2.5:1.5b-instruct-q8_0,mmlu,52,100,0.52,0,2.0,0.8
+qwen2.5:1.5b,gsm8k,70,100,0.7,0,245.6,7.6
+qwen2.5:1.5b,mmlu,51,100,0.51,0,2.0,0.9
+qwen2.5:0.5b,gsm8k,45,100,0.45,0,302.2,3.7
+qwen2.5:0.5b,mmlu,31,100,0.31,4,3.1,0.3
