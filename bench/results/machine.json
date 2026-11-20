@@ -1,0 +1,6 @@
+{
+  "chip": "Apple M1",
+  "ram_gb": 8,
+  "os": "macOS-27.2.1-arm64-arm-64bit",
+  "ollama": "0.40.16"
+}
