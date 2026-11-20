@@ -60,6 +60,15 @@
   .card .text { color: var(--muted); max-height: 80px; overflow: hidden; }
   #summary { margin-top: 12px; font-size: 14px; }
 
+  /* Arena */
+  .arena-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+  @media (max-width: 600px) { .arena-grid { grid-template-columns: 1fr; } }
+  .arena-grid .msg { max-width: none; min-height: 100px; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+
   /* How it works */
   .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 16px; }
   .box { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--bg); font-size: 14px; }
@@ -79,6 +88,7 @@
 
   <nav>
     <button data-tab="chat" class="active">Chat</button>
+    <button data-tab="arena">Arena</button>
     <button data-tab="stress">Stress test</button>
     <button data-tab="how">How it works</button>
   </nav>
@@ -102,6 +112,36 @@
       <label class="toggle" title="Temperature 0: the same question always gets the same answer, so repeats come from the cache">
         <input type="checkbox" id="repeatToggle"> repeatable answers (cache)</label>
     </div>
+  </section>
+
+  <!-- Tab: Arena -->
+  <section id="tab-arena" class="panel hidden">
+    <p>Two hidden models answer the same question. You pick the better answer, then see who was who.
+      Every vote updates the leaderboard and becomes a training example (preferred vs. rejected answer),
+      the same kind of human-preference data AI labs use to improve chat models (RLHF / DPO).</p>
+    <form id="arenaForm">
+      <input type="text" id="arenaInput" placeholder="Ask both models something…" autocomplete="off" required>
+      <button class="btn" id="arenaBtn">Battle</button>
+    </form>
+    <div class="arena-grid">
+      <div class="msg ai"><b>Model A</b> <span class="muted" id="nameA"></span><div id="answerA"></div></div>
+      <div class="msg ai"><b>Model B</b> <span class="muted" id="nameB"></span><div id="answerB"></div></div>
+    </div>
+    <div class="controls hidden" id="voteRow">
+      <button class="btn secondary" data-vote="a">👈 A is better</button>
+      <button class="btn secondary" data-vote="tie">🤝 Tie</button>
+      <button class="btn secondary" data-vote="b">👉 B is better</button>
+      <button class="btn secondary" data-vote="both_bad">👎 Both bad</button>
+    </div>
+    <h3>Leaderboard <span class="muted" id="voteCount"></span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Model</th><th>Elo</th><th>Win rate</th><th>Battles</th><th>Avg speed</th></tr></thead>
+        <tbody id="boardBody"></tbody>
+      </table>
+    </div>
+    <p class="muted">Elo works like chess ratings: every model starts at 1000, and beating a strong model earns
+      more points. <a href="/arena/export.jsonl">Download the preference data (JSONL)</a></p>
   </section>
 
   <!-- Tab 2: Stress test -->
@@ -171,6 +211,11 @@ async function streamChat(messages, onToken, { maxTokens = 256, signal, model, t
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, stream: true, max_tokens: maxTokens, model, temperature }),
   });
+  return readSSE(res, onToken);
+}
+
+// Reads a Server-Sent Events response: calls onToken(text) per piece, returns the final metrics.
+async function readSSE(res, onToken) {
   if (res.status === 429) throw new Error("busy");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -323,6 +368,67 @@ document.getElementById("jsonBtn").addEventListener("click", async () => {
   } catch (err) {
     bubble.classList.add("err");
     bubble.textContent = "Error: " + err.message;
+  }
+});
+
+// ---------- Arena tab ----------
+let battleId = null;
+const voteRow = document.getElementById("voteRow");
+
+async function loadLeaderboard() {
+  const board = await (await fetch("/arena/leaderboard")).json();
+  document.getElementById("voteCount").textContent = `(${board.total_votes} votes)`;
+  const body = document.getElementById("boardBody");
+  body.innerHTML = "";
+  board.models.forEach((m, i) => {
+    const tr = body.insertRow();
+    const speed = m.avg_tokens_per_sec ? `${m.avg_tokens_per_sec} tok/s` : "–";
+    for (const v of [i + 1, m.model, m.elo, `${Math.round(m.win_rate * 100)}%`, m.battles, speed]) {
+      tr.insertCell().textContent = v;
+    }
+  });
+}
+loadLeaderboard();
+
+document.getElementById("arenaForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const btn = document.getElementById("arenaBtn");
+  btn.disabled = true;
+  voteRow.classList.add("hidden");
+  for (const id of ["nameA", "nameB"]) document.getElementById(id).textContent = "";
+  try {
+    const res = await fetch("/arena/battles", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: document.getElementById("arenaInput").value }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error?.message || `HTTP ${res.status}`);
+    battleId = (await res.json()).battle_id;
+    // Both answers stream at the same time, side by side.
+    await Promise.all(["a", "b"].map(async side => {
+      const box = document.getElementById(side === "a" ? "answerA" : "answerB");
+      box.textContent = "";
+      await readSSE(await fetch(`/arena/battles/${battleId}/stream/${side}`), piece => box.textContent += piece);
+    }));
+    voteRow.classList.remove("hidden");
+  } catch (err) {
+    document.getElementById("answerA").textContent = err.message === "busy" ? "Server busy, try again." : "Error: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+voteRow.addEventListener("click", async e => {
+  const winner = e.target.dataset.vote;
+  if (!winner || !battleId) return;
+  voteRow.classList.add("hidden");
+  const res = await fetch(`/arena/battles/${battleId}/vote`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ winner }),
+  });
+  const r = await res.json();
+  if (res.ok) {
+    document.getElementById("nameA").textContent = `was ${r.model_a}`;
+    document.getElementById("nameB").textContent = `was ${r.model_b}`;
+    loadLeaderboard();
   }
 });
 

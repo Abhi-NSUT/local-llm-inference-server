@@ -64,7 +64,8 @@ async def chat(req: ChatRequest, request: Request):
         return error(429, "overloaded", "Server is busy, please retry shortly.")
 
     if req.stream:
-        save = (lambda text, usage: cache.put(cache_key, GenerationResult(text, usage))) if cache_key else None
+        save = (lambda text, usage, _metrics: cache.put(cache_key, GenerationResult(text, usage))) \
+            if cache_key else None
         return sse_response(stream_chat(backend, limiter, settings, messages, params, on_complete=save))
 
     timer = RequestTimer()
@@ -149,12 +150,12 @@ def chunk(cid: str, model: str, delta: dict, finish: str | None = None, **extra)
 
 
 async def stream_chat(backend, limiter, settings, messages: list[dict], params: GenerationParams,
-                      on_complete: Callable[[str, Usage], None] | None = None):
+                      on_complete: Callable[[str, Usage, dict], None] | None = None):
     """Yield the answer as OpenAI-style `chat.completion.chunk` events, then `[DONE]`.
 
     The concurrency slot is held for the WHOLE stream. If the client disconnects, this generator
     is cancelled and the `finally` blocks free the slot and stop the model.
-    `on_complete(text, usage)` is called only when the answer finished normally.
+    `on_complete(text, usage, metrics)` is called only when the answer finished normally.
     """
     cid = new_id()
     timer, usage, pieces, status = RequestTimer(), Usage(), [], "ok"
@@ -168,7 +169,7 @@ async def stream_chat(backend, limiter, settings, messages: list[dict], params: 
             m = timer.finish(usage.completion_tokens or len(pieces))
             status = "done"
             if on_complete:
-                on_complete("".join(pieces), usage)
+                on_complete("".join(pieces), usage, m)
             # `metrics` is an extra field; OpenAI clients simply ignore it, our demo page shows it.
             yield sse(chunk(cid, params.model, {}, finish="stop", metrics=m))
     except QueueFullError:

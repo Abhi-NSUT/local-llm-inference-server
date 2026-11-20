@@ -17,6 +17,8 @@ def make_client(monkeypatch):
     async def _make(delay: float = 0.0, **env):
         monkeypatch.setenv("BACKEND", "fake")
         monkeypatch.setenv("MODEL_ID", "fake-model")
+        monkeypatch.setenv("ALLOWED_MODELS", "[]")  # don't depend on the local .env file
+        monkeypatch.setenv("ARENA_DB", ":memory:")  # fresh, throwaway database per test
         for key, value in env.items():
             monkeypatch.setenv(key, str(value))
         async with LifespanManager(app):

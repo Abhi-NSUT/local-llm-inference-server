@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     cache_max_entries: int = 500    # answers remembered for repeated temperature-0 questions
     cache_ttl_seconds: float = 3600
 
+    arena_models: list[str] = []    # models that compete in the arena; empty = all allowed models
+    arena_db: str = "data/arena.db"  # SQLite file with battles and votes
+
     log_level: str = "INFO"
 
     @property
