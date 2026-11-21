@@ -11,6 +11,14 @@ own laptop instead of a paid API. It has a web page where you can chat with it, 
 side, stress-test it with many simultaneous questions, and see live performance charts. I then measured how much
 faster and smaller the model gets when compressed, and what that does to its answers.
 
+## Try it
+
+- **Demo page: https://abhi-nsut.github.io/local-llm-inference-server/**. A static copy of the app on GitHub
+  Pages. There is no AI server behind it, so Chat, Arena and Stress test replay real responses recorded from the
+  server, at their original speed. The Benchmarks tab shows the real measurements.
+- **Live:** [run it locally](#run-it-locally) (about 5 minutes), or I can share a live link from my laptop during a
+  call (`scripts/share_live.sh`).
+
 ---
 
 ## What I found
@@ -95,7 +103,7 @@ previous run's prompt processing. Everything ran on one machine; other chips wil
 | **Model Arena** | Two hidden models answer the same prompt and a person votes. The arena keeps an Elo leaderboard and exports votes as `{prompt, chosen, rejected}` preference data (the format used for DPO fine-tuning) |
 | **Metrics** | Per-request time to first token, total time and tokens/sec, plus a per-request timeline (waiting / reading prompt / writing), a live dashboard, and a Prometheus endpoint |
 | **Benchmark Lab** | Reproducible scripts for speed, memory, accuracy and concurrency, with results committed |
-| **Tests** | 35 tests run against a fake model backend, so they need no GPU or Ollama. They run in GitHub Actions on every push |
+| **Tests** | 38 tests run against a fake model backend, so they need no GPU or Ollama. They run in GitHub Actions on every push |
 
 ### Demo page tabs
 **Chat** (streaming on/off, model picker, JSON-mode example) · **Arena** · **Stress test** (fires several questions at
@@ -177,6 +185,19 @@ uv run uvicorn app.main:app --port 8000           # open http://localhost:8000
 uv run pytest -q
 ```
 
+### Share it live, or run it in Docker
+```bash
+brew install cloudflared
+scripts/share_live.sh               # prints a temporary public https link; public-demo limits switched on
+
+docker build -t llm-server . && docker run -p 7860:7860 llm-server   # any Docker host, e.g. a cloud VM
+```
+
+### Update the static demo
+```bash
+uv run python scripts/record_demo.py   # re-records app/static/demo/recordings.json; Pages republishes on push
+```
+
 ### Reproduce the benchmarks
 ```bash
 ollama pull qwen2.5:1.5b-instruct-fp16
@@ -200,10 +221,10 @@ app/
   arena/                battles, votes, Elo leaderboard, preference export (SQLite)
   backends/             backend interface, Ollama backend, fake backend for tests
   core/                 concurrency limiter, response cache, metrics
-  static/               demo page (one HTML file) and benchmark summary
+  static/               demo page (one HTML file), benchmark summary, recorded responses for the static copy
 bench/                  datasets, benchmark scripts, committed results
-scripts/                load test, terminal streaming client
-tests/                  35 tests, run in GitHub Actions
+scripts/                load test, terminal client, demo recorder, live-sharing script
+tests/                  38 tests, run in GitHub Actions
 ```
 
 ---

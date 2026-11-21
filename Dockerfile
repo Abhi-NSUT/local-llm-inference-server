@@ -1,9 +1,10 @@
-# One container runs both Ollama (the model) and the FastAPI app, as Hugging Face Spaces expects.
+# One container runs both Ollama (the model) and the FastAPI app, for any Docker host (e.g. a cloud VM).
+#   docker build -t llm-server . && docker run -p 7860:7860 llm-server
 FROM ollama/ollama:0.40.16
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.8 /uv /usr/local/bin/uv
 
-# Spaces run the container as user 1000, so everything lives in that user's home directory.
+# Run as an ordinary user (uid 1000), not root; everything lives in its home directory.
 RUN useradd -m -u 1000 user
 USER user
 ENV HOME=/home/user \
