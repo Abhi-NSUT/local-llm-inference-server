@@ -318,7 +318,7 @@ async function streamChat(messages, onToken, { maxTokens = 256, signal, model, t
 
 // Reads a Server-Sent Events response: calls onToken(text) per piece, returns the final metrics.
 async function readSSE(res, onToken) {
-  if (res.status === 429) throw new Error("busy");
+  if (res.status === 429) throw new Error(tooManyMessage(await res.json().catch(() => ({}))));
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const reader = res.body.getReader(), decoder = new TextDecoder();
@@ -342,6 +342,9 @@ async function readSSE(res, onToken) {
   return metrics;
 }
 
+// 429 means either "the server is full" (busy) or "you personally sent too many" (rate limited).
+const tooManyMessage = body => body.error?.type === "rate_limited" ? body.error.message : "busy";
+
 // Whole answer at once (streaming off).
 async function askOnce(messages, { maxTokens = 256, signal, model, responseFormat, temperature } = {}) {
   const res = await fetch("/v1/chat/completions", {
@@ -351,7 +354,7 @@ async function askOnce(messages, { maxTokens = 256, signal, model, responseForma
                            response_format: responseFormat }),
   });
   const body = await res.json();
-  if (res.status === 429) throw new Error("busy");
+  if (res.status === 429) throw new Error(tooManyMessage(body));
   if (!res.ok) throw new Error(body.error?.message || `HTTP ${res.status}`);
   return { text: body.choices[0].message.content, metrics: body.metrics };
 }

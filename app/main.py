@@ -15,6 +15,7 @@ from app.config import Settings
 from app.core.cache import ResponseCache
 from app.core.concurrency import ConcurrencyLimiter
 from app.core.metrics import STATS
+from app.core.rate_limit import RateLimiter
 
 
 async def sample_every_second(app: FastAPI):
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI):
     app.state.limiter = ConcurrencyLimiter(settings.max_concurrency, settings.queue_size)
     app.state.cache = ResponseCache(settings.cache_max_entries, settings.cache_ttl_seconds)
     app.state.arena = ArenaStore(settings.arena_db)
+    app.state.rate_limiter = RateLimiter(settings.rate_limit_per_minute)
     await app.state.backend.startup()  # once at startup, not per request
     sampler = asyncio.create_task(sample_every_second(app))
     yield

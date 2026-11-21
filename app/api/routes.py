@@ -12,6 +12,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from app.backends.base import GenerationParams, GenerationResult, Usage
 from app.core.concurrency import QueueFullError, with_deadline
 from app.core.metrics import STATS, RequestTimer
+from app.core.rate_limit import client_ip
 from app.schemas import ChatRequest, GenerateRequest
 
 router = APIRouter()
@@ -65,6 +66,10 @@ async def models(request: Request):
 async def chat(req: ChatRequest, request: Request):
     state = request.app.state
     backend, limiter, settings, cache = state.backend, state.limiter, state.settings, state.cache
+    if not state.rate_limiter.allow(client_ip(request)):
+        return error(429, "rate_limited", "Too many requests from you. Please wait a minute.")
+    if sum(len(m.content) for m in req.messages) > settings.max_input_chars:
+        return error(400, "invalid_request", f"Messages are too long (max {settings.max_input_chars} characters).")
     if req.model and req.model not in settings.models:
         return error(400, "invalid_request", f"Unknown model '{req.model}'. Available: {settings.models}")
     json_format = req.response_format.to_backend_format() if req.response_format else None

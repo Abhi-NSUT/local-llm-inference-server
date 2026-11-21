@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.api.routes import error, sse_response, stream_chat
 from app.backends.base import GenerationParams
+from app.core.rate_limit import client_ip
 
 from .store import leaderboard
 
@@ -30,6 +31,8 @@ class VoteRequest(BaseModel):
 @router.post("/battles")
 async def create_battle(req: BattleRequest, request: Request):
     settings = request.app.state.settings
+    if not request.app.state.rate_limiter.allow(client_ip(request)):
+        return error(429, "rate_limited", "Too many requests from you. Please wait a minute.")
     models = settings.arena_models or settings.models
     if len(models) < 2:
         return error(400, "invalid_request", "The arena needs at least 2 models.")
