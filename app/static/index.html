@@ -32,6 +32,12 @@
   nav button { background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted);
                padding: 8px 12px; font: inherit; cursor: pointer; }
   nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  .static-only { display: none; }
+  body.static-demo .static-only { display: flex; flex-wrap: wrap; }
+  body.static-demo p.static-only { display: block; }
+  body.static-demo .live-only { display: none; }
+  .banner { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-left: 3px solid var(--accent);
+            border-radius: 8px; background: var(--panel); font-size: 14px; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
   .hidden { display: none; }
   .muted { color: var(--muted); font-size: 13px; }
@@ -98,9 +104,13 @@
     <h1>⚡ Local LLM Inference Server</h1>
     <div class="status">
       <span class="dot" id="dot"></span><span id="statusText">connecting…</span>
-      · <a href="/docs" target="_blank">API docs</a>
+      · <a href="docs" target="_blank">API docs</a>
     </div>
   </header>
+
+  <p class="banner static-only">You're viewing a static copy. There is no AI server behind this page, so every answer
+    is a real response recorded from the server (<span id="recordedOn"></span>) and replayed at its original speed.
+    Benchmarks are real measurements. To use it live, <a href="https://github.com/Abhi-NSUT/local-llm-inference-server#run-it-locally">run it locally</a>.</p>
 
   <nav>
     <button data-tab="chat" class="active">Chat</button>
@@ -117,6 +127,7 @@
       <p class="muted">Ask anything. The answer comes from a small open-source AI model (Qwen 2.5) running on this
         server, not from an external AI service. Under each answer you'll see how fast it was.</p>
     </div>
+    <div class="controls static-only" id="chatSuggestions" style="margin-top: 12px"></div>
     <form id="chatForm">
       <input type="text" id="chatInput" placeholder="Type a message…" autocomplete="off" required>
       <button class="btn" id="sendBtn">Send</button>
@@ -137,6 +148,7 @@
     <p>Two hidden models answer the same question. You pick the better answer, then see who was who.
       Every vote updates the leaderboard and becomes a training example (preferred vs. rejected answer),
       the same kind of human-preference data AI labs use to improve chat models (RLHF / DPO).</p>
+    <div class="controls static-only" id="arenaSuggestions"></div>
     <form id="arenaForm">
       <input type="text" id="arenaInput" placeholder="Ask both models something…" autocomplete="off" required>
       <button class="btn" id="arenaBtn">Battle</button>
@@ -159,7 +171,7 @@
       </table>
     </div>
     <p class="muted">Elo works like chess ratings: every model starts at 1000, and beating a strong model earns
-      more points. <a href="/arena/export.jsonl">Download the preference data (JSONL)</a></p>
+      more points. <a class="live-only" href="arena/export.jsonl">Download the preference data (JSONL)</a></p>
   </section>
 
   <!-- Tab 2: Stress test -->
@@ -179,7 +191,7 @@
   <section id="tab-dashboard" class="panel hidden">
     <p class="muted">Live view of the server over the last 5 minutes, updated every 2 seconds.
       Tip: run the stress test in another browser tab and watch the charts move.
-      Monitoring tools can read the same numbers at <a href="/metrics/prometheus" target="_blank">/metrics/prometheus</a>.</p>
+      Monitoring tools can read the same numbers at <a class="live-only" href="metrics/prometheus" target="_blank">/metrics/prometheus</a>.</p>
     <div class="tiles">
       <div class="tile"><span class="muted">Requests</span><b id="tileRequests">–</b></div>
       <div class="tile"><span class="muted">Cache hit rate</span><b id="tileCache">–</b></div>
@@ -275,12 +287,107 @@
       <li><b>OpenAI-compatible:</b> code written for OpenAI's API works here by changing one URL.</li>
     </ul>
     <p class="muted">For engineers: Python 3.12 · FastAPI · asyncio semaphore + bounded queue · SSE · pytest + GitHub Actions.
-      Try the endpoints in the <a href="/docs" target="_blank">interactive API docs</a> or read the
+      Try the endpoints in the <a href="docs" target="_blank">interactive API docs</a> or read the
       <a href="https://github.com/Abhi-NSUT/local-llm-inference-server" target="_blank">source code</a>.</p>
   </section>
 </div>
 
 <script>
+// ---------- Live server or static copy? ----------
+// Every server request goes through api(). With the server running, it is a plain fetch().
+// On a static host (GitHub Pages) there is no server, so api() replays real responses recorded
+// from the server by scripts/record_demo.py, with their original timing.
+let RECORDINGS = null;
+const ready = (async () => {
+  try {
+    const r = await fetch("health");
+    if (r.ok || r.status === 503) return;            // a live server answered (503 = model offline)
+  } catch { /* no server */ }
+  RECORDINGS = await (await fetch("demo/recordings.json")).json();
+  document.body.classList.add("static-demo");
+})();
+
+async function api(path, opts = {}) {
+  await ready;
+  return RECORDINGS ? replay(path, opts) : fetch(path, opts);
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const FALLBACK = "This static copy can only replay recorded questions. Pick one of the suggestions, " +
+                 "or run the project locally for live answers.";
+
+function recordingKey(path, body, replayKey) {
+  if (replayKey) return replayKey;
+  if (path === "v1/chat/completions") {
+    return `chat|${body.model}|${body.stream}|${body.response_format ? "json" : ""}|${body.messages.at(-1).content}`;
+  }
+  if (path === "arena/battles") return `battle|${body.prompt}`;
+  return path;
+}
+
+async function replay(path, opts) {
+  const body = opts.body ? JSON.parse(opts.body) : {};
+  const vote = path.match(/^arena\/battles\/(\w+)\/vote$/);
+  if (vote) {  // votes aren't stored in the static copy; just reveal the recorded models
+    return Response.json({ winner: body.winner, ...RECORDINGS.battles[vote[1]] });
+  }
+  const rec = RECORDINGS.responses[recordingKey(path, body, opts.replayKey)] ?? fallback(path, body);
+  if (rec.json !== undefined) {
+    await sleep(rec.t ?? 0);  // the recorded waiting time, e.g. a non-streaming answer
+    return Response.json(rec.json, { status: rec.status });
+  }
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const t0 = performance.now();
+      for (const [t, data] of rec.events) {
+        await sleep(t - (performance.now() - t0));
+        if (opts.signal?.aborted) return controller.error(new DOMException("Stopped", "AbortError"));
+        controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: rec.status, headers: { "Content-Type": "text/event-stream" } });
+}
+
+function fallback(path, body) {
+  if (path === "arena/battles") return { status: 404, json: { error: { message: FALLBACK } } };
+  if (path !== "v1/chat/completions") return { status: 404, json: { error: { message: "Not recorded." } } };
+  if (!body.stream) {
+    return { status: 200, json: { choices: [{ message: { role: "assistant", content: FALLBACK } }] } };
+  }
+  const chunk = delta => JSON.stringify({ choices: [{ delta }] });
+  return { status: 200, events: [[0, chunk({ role: "assistant" })], [0, chunk({ content: FALLBACK })], [0, "[DONE]"]] };
+}
+
+// Static copy: show the banner, suggested questions, and only the recorded stress-test sizes.
+ready.then(() => {
+  if (!RECORDINGS) return;
+  const suggest = (id, prompts, inputId, formId) => {
+    for (const p of prompts) {
+      const b = document.createElement("button");
+      b.className = "btn secondary";
+      b.type = "button";
+      b.textContent = p;
+      b.addEventListener("click", () => {
+        document.getElementById(inputId).value = p;
+        document.getElementById(formId).requestSubmit();
+      });
+      document.getElementById(id).appendChild(b);
+    }
+  };
+  suggest("chatSuggestions", RECORDINGS.chat_prompts, "chatInput", "chatForm");
+  suggest("arenaSuggestions", RECORDINGS.arena_prompts, "arenaInput", "arenaForm");
+  for (const opt of [...document.getElementById("stressCount").options]) {
+    if (!RECORDINGS.stress_counts.includes(Number(opt.value))) opt.remove();
+  }
+  document.getElementById("recordedOn").textContent =
+    `${RECORDINGS.machine.chip}, ${RECORDINGS.machine.ram_gb} GB RAM, ${RECORDINGS.recorded_at}`;
+  const repo = "https://github.com/Abhi-NSUT/local-llm-inference-server";
+  document.querySelectorAll('a[href="docs"]').forEach(a => a.href = `${repo}#api`);
+});
+
 // ---------- Tabs ----------
 document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b === btn));
@@ -291,9 +398,10 @@ document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("cli
 async function refreshStatus() {
   const dot = document.getElementById("dot"), text = document.getElementById("statusText");
   try {
-    const h = await (await fetch("/health")).json();
+    const h = await (await api("health")).json();
     dot.className = "dot " + (h.status === "ok" ? "on" : "off");
-    text.textContent = `${h.model} · ${h.in_flight} answering · ${h.waiting} waiting · capacity ${h.capacity}`;
+    text.textContent = RECORDINGS ? `recorded demo · ${h.model} · capacity ${h.capacity}`
+                                  : `${h.model} · ${h.in_flight} answering · ${h.waiting} waiting · capacity ${h.capacity}`;
     document.getElementById("capacityText").textContent =
       `This server answers ${h.capacity} at a time, lets up to ${h.queue_size} wait in line, and politely turns away the rest ("busy").`;
   } catch {
@@ -307,9 +415,9 @@ setInterval(refreshStatus, 2000);
 // ---------- Talking to the API ----------
 // Streams an answer. Calls onToken(text) for each piece and returns the final metrics.
 // EventSource only supports GET, so we read the POST response body as a stream instead.
-async function streamChat(messages, onToken, { maxTokens = 256, signal, model, temperature } = {}) {
-  const res = await fetch("/v1/chat/completions", {
-    method: "POST", signal,
+async function streamChat(messages, onToken, { maxTokens = 256, signal, model, temperature, replayKey } = {}) {
+  const res = await api("v1/chat/completions", {
+    method: "POST", signal, replayKey,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, stream: true, max_tokens: maxTokens, model, temperature }),
   });
@@ -347,7 +455,7 @@ const tooManyMessage = body => body.error?.type === "rate_limited" ? body.error.
 
 // Whole answer at once (streaming off).
 async function askOnce(messages, { maxTokens = 256, signal, model, responseFormat, temperature } = {}) {
-  const res = await fetch("/v1/chat/completions", {
+  const res = await api("v1/chat/completions", {
     method: "POST", signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, stream: false, max_tokens: maxTokens, model, temperature,
@@ -446,7 +554,7 @@ const chosenTemperature = () => document.getElementById("repeatToggle").checked 
 
 // ---------- Model picker ----------
 const modelSelect = document.getElementById("modelSelect");
-fetch("/v1/models").then(r => r.json()).then(list => {
+api("v1/models").then(r => r.json()).then(list => {
   for (const m of list.data) modelSelect.add(new Option(m.id, m.id));
 });
 
@@ -481,7 +589,7 @@ let battleId = null;
 const voteRow = document.getElementById("voteRow");
 
 async function loadLeaderboard() {
-  const board = await (await fetch("/arena/leaderboard")).json();
+  const board = await (await api("arena/leaderboard")).json();
   document.getElementById("voteCount").textContent = `(${board.total_votes} votes)`;
   const body = document.getElementById("boardBody");
   body.innerHTML = "";
@@ -502,7 +610,7 @@ document.getElementById("arenaForm").addEventListener("submit", async e => {
   voteRow.classList.add("hidden");
   for (const id of ["nameA", "nameB"]) document.getElementById(id).textContent = "";
   try {
-    const res = await fetch("/arena/battles", {
+    const res = await api("arena/battles", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: document.getElementById("arenaInput").value }),
     });
@@ -512,7 +620,7 @@ document.getElementById("arenaForm").addEventListener("submit", async e => {
     await Promise.all(["a", "b"].map(async side => {
       const box = document.getElementById(side === "a" ? "answerA" : "answerB");
       box.textContent = "";
-      await readSSE(await fetch(`/arena/battles/${battleId}/stream/${side}`), piece => box.textContent += piece);
+      await readSSE(await api(`arena/battles/${battleId}/stream/${side}`), piece => box.textContent += piece);
     }));
     voteRow.classList.remove("hidden");
   } catch (err) {
@@ -526,7 +634,7 @@ voteRow.addEventListener("click", async e => {
   const winner = e.target.dataset.vote;
   if (!winner || !battleId) return;
   voteRow.classList.add("hidden");
-  const res = await fetch(`/arena/battles/${battleId}/vote`, {
+  const res = await api(`arena/battles/${battleId}/vote`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ winner }),
   });
   const r = await res.json();
@@ -582,9 +690,9 @@ async function refreshDashboard() {
     ttft: makeChart("chartTtft", [["first word (ms)", "--accent"]]),
     queue: makeChart("chartQueue", [["answering", "--accent"], ["waiting", "--warn"]]),
   };
-  const [ts, summary, details] = await Promise.all([fetch("/metrics/timeseries").then(r => r.json()),
-                                                    fetch("/metrics").then(r => r.json()),
-                                                    fetch("/metrics/details").then(r => r.json())]);
+  const [ts, summary, details] = await Promise.all([api("metrics/timeseries").then(r => r.json()),
+                                                    api("metrics").then(r => r.json()),
+                                                    api("metrics/details").then(r => r.json())]);
   renderModels(details);
   renderRecent(details.recent);
   const ms = v => v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${Math.round(v)} ms`;
@@ -664,7 +772,7 @@ let benchDrawn = false;
 async function drawBenchmarks() {
   if (benchDrawn || !window.Chart) return;
   benchDrawn = true;
-  const b = await (await fetch("/bench.json")).json();
+  const b = await (await fetch("bench.json")).json();
   const m = b.machine;
   document.getElementById("benchMachine").textContent =
     `Measured on ${m.chip} with ${m.ram_gb} GB RAM, Ollama ${m.ollama}. Same questions for every model, randomness off.`;
@@ -735,7 +843,7 @@ document.getElementById("stressBtn").addEventListener("click", async () => {
         if (first === null) { first = performance.now() - start; set("answering", "✍️ answering"); }
         answer += piece;
         text.textContent = answer;
-      }, { maxTokens: 60 });
+      }, { maxTokens: 60, replayKey: `stress-${count}-${i}` });  // replayKey: used only by the static copy
       const secs = (performance.now() - start) / 1000;
       set("done", `✅ done in ${secs.toFixed(1)} s`);
       return { ok: true, first, tokens: m?.completion_tokens ?? 0 };
