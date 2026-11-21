@@ -5,11 +5,12 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ["app/static/**"]
+    paths: ["app/static/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read      # lets the deploy step find the uploaded page files
   pages: write
   id-token: write
 
